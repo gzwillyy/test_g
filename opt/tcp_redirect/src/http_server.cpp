@@ -1,6 +1,6 @@
 #include "common.h"
+#include "http_server.h"   // ← 新增这一行
 #include <asio.hpp>
-
 class HTTPServer {
 private:
     asio::io_context io_;
