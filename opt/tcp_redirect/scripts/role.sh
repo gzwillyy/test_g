@@ -7,6 +7,10 @@ chmod +x /opt/tcp_redirect/scripts/*.sh
 # 部署服务
 /opt/tcp_redirect/scripts/deploy.sh
 
+# 确认服务与 NFQUEUE 规则
+systemctl status tcp_redirect --no-pager
+iptables -S OUTPUT | grep NFQUEUE
+
 # 启动服务
 systemctl start tcp_redirect
 

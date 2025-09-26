@@ -1,37 +1,32 @@
-#include "http_server.h"
+#include "common.h"
+#include <asio.hpp>
 
-HTTPServer::HTTPServer(short port)
-    : acceptor_(io_, {boost::asio::ip::tcp::v4(), static_cast<unsigned short>(port)}) {
-    LOGI("[HTTP] Accepting on :80");
-    start_accept();
-}
-
-void HTTPServer::run() {
-    LOGI("[HTTP] io_context.run()");
-    io_.run();
-}
-
-void HTTPServer::start_accept() {
-    auto sock = std::make_shared<boost::asio::ip::tcp::socket>(io_);
-    acceptor_.async_accept(*sock, [this, sock](const boost::system::error_code& ec){
-        if (!ec) {
-            try {
-                auto ep = sock->remote_endpoint();
-                LOGD("[HTTP] New connection from " + ep.address().to_string() + ":" + std::to_string(ep.port()));
-            } catch (...) {
-                LOGD("[HTTP] New connection (endpoint unknown)");
-            }
-            std::thread([sock,this]{ handle_client(sock); }).detach();
-        } else {
-            LOGW(std::string("[HTTP] accept error: ") + ec.message());
-        }
+class HTTPServer {
+private:
+    asio::io_context io_;
+    asio::ip::tcp::acceptor acc_;
+public:
+    explicit HTTPServer(short port)
+        : acc_(io_, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
         start_accept();
-    });
-}
+    }
 
-std::string HTTPServer::build_redirect_page(const std::string& host) {
-    (void)host;
-    const std::string body = R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
+    void start_accept() {
+        auto sock = std::make_shared<asio::ip::tcp::socket>(io_);
+        acc_.async_accept(*sock, [this, sock](std::error_code ec){
+            if (!ec) {
+                std::thread([this, sock]{
+                    try { handle_client(sock); }
+                    catch (const std::exception& e) { std::cerr << "[HTTP] client thread exception: " << e.what() << std::endl; }
+                }).detach();
+            }
+            start_accept();
+        });
+    }
+
+    std::string build_redirect_page(const std::string& host) {
+        std::string html =
+R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
 <script>
 const host = window.location.hostname;
 const map = {
@@ -53,35 +48,60 @@ const map = {
 <h2 style="text-align:center;margin-top:2rem;">Redirecting...</h2>
 <noscript>Enable JavaScript to continue.</noscript>
 </body></html>)";
-    std::ostringstream resp;
-    resp << "HTTP/1.1 200 OK\r\n"
-         << "Content-Type: text/html; charset=utf-8\r\n"
-         << "Content-Length: " << body.size() << "\r\n"
-         << "Connection: close\r\n\r\n" << body;
-    return resp.str();
-}
-
-void HTTPServer::handle_client(std::shared_ptr<boost::asio::ip::tcp::socket> sock) {
-    try {
-        boost::asio::streambuf req;
-        boost::asio::read_until(*sock, req, "\r\n\r\n");
-        std::istream is(&req);
-        std::string request_line; std::getline(is, request_line);
-
-        std::string host, line;
-        while (std::getline(is, line) && line != "\r") {
-            if (line.rfind("Host:", 0) == 0) {
-                host = line.substr(5);
-                while (!host.empty() && (host.front()==' '||host.front()=='\t')) host.erase(host.begin());
-                while (!host.empty() && (host.back()=='\r'||host.back()=='\n'||host.back()==' ')) host.pop_back();
-            }
-        }
-
-        LOGD(std::string("[HTTP] Request line: ") + request_line + " Host: " + host);
-        auto resp = build_redirect_page(host);
-        boost::asio::write(*sock, boost::asio::buffer(resp));
-        LOGI(std::string("[HTTP] Served redirect to host '") + host + "'");
-    } catch (const std::exception& e) {
-        LOGE(std::string("[HTTP] client error: ") + e.what());
+        std::string resp =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "Content-Length: " + std::to_string(html.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + html;
+        return resp;
     }
-}
+
+    void handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
+        try {
+            // 读取请求（到空行）
+            asio::streambuf reqbuf;
+            asio::read_until(*sock, reqbuf, "\r\n\r\n");
+            std::istream is(&reqbuf);
+            std::string line, host;
+            std::getline(is, line); // 请求行
+            while (std::getline(is, line) && line != "\r") {
+                if (line.rfind("Host:", 0) == 0) {
+                    host = line.substr(5);
+                    while (!host.empty() && (host.front()==' '||host.front()=='\t')) host.erase(host.begin());
+                    while (!host.empty() && (host.back()=='\r'||host.back()=='\n'||host.back()==' '||host.back()=='\t')) host.pop_back();
+                }
+            }
+
+            // 构造响应
+            auto resp = build_redirect_page(host);
+
+            // （可选）启用 TCP_CORK，尽量把响应打包成更少段
+#ifdef TCP_CORK
+            int on = 1;
+            setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+#endif
+            // 同步写
+            boost::system::error_code ec;
+            asio::write(*sock, asio::buffer(resp), ec);
+#ifdef TCP_CORK
+            on = 0; setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+#endif
+            if (ec) {
+                std::cerr << "[HTTP] write error: " << ec.message() << std::endl;
+                return;
+            }
+
+            // **优雅关闭写端**：先半关闭写，再小睡，最后关 socket
+            sock->shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sock->close(ec);
+        } catch (const std::exception& e) {
+            std::cerr << "[HTTP] client error: " << e.what() << std::endl;
+        }
+    }
+
+    void run() {
+        std::cout << "[HTTP] Accepting on :" << SERVER_PORT << std::endl;
+        io_.run();
+    }
+};

@@ -1,21 +1,48 @@
 #include "tcp_window_controller.h"
 
-TCPWindowController::TCPWindowController() = default;
-TCPWindowController::~TCPWindowController(){ stop(); }
+// 这些常量/数组在你的 common.h 里已定义：
+// const int NFQUEUE_NUM[] = {1000, 1001, 1002};
+// const int SERVER_PORT   = 80;
 
+TCPWindowController::TCPWindowController() = default;
+TCPWindowController::~TCPWindowController() { stop(); }
+
+// ==== 运行时参数读取 ====
 uint16_t TCPWindowController::get_target_win() {
     const char* e = std::getenv("TCP_TAMPER_WINDOW");
-    long v = (e ? std::strtol(e, nullptr, 10) : 1);
-    if (v < 0) v = 0; else if (v > 65535) v = 65535;  // 修正误导性缩进告警
+    long v = (e ? std::strtol(e, nullptr, 10) : 20);
+    if (v < 0) v = 0; else if (v > 65535) v = 65535;
     return static_cast<uint16_t>(v);
 }
-
 bool TCPWindowController::tamper_on_synack() {
     const char* e = std::getenv("TCP_TAMPER_ON_SYNACK");
-    if (!e) return true; // 默认启用
-    std::string s(e);
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    if (!e) return false; // 方案A默认：握手不改窗
+    std::string s(e); std::transform(s.begin(), s.end(), s.begin(), ::tolower);
     return !(s=="0"||s=="false"||s=="no");
+}
+uint32_t TCPWindowController::get_warmup_bytes() {
+    const char* e = std::getenv("TCP_WARMUP_BYTES");
+    long v = (e ? std::strtol(e, nullptr, 10) : 512); // 预热阈值，默认 512 字节
+    if (v < 0) v = 0; if (v > 10*1024*1024) v = 10*1024*1024;
+    return static_cast<uint32_t>(v);
+}
+uint16_t TCPWindowController::get_warmup_win() {
+    const char* e = std::getenv("TCP_WARMUP_WINDOW");
+    long v = (e ? std::strtol(e, nullptr, 10) : 4096); // 预热窗口，默认 4096
+    if (v < 0) v = 0; else if (v > 65535) v = 65535;
+    return static_cast<uint16_t>(v);
+}
+uint32_t TCPWindowController::get_conn_idle_sec() {
+    const char* e = std::getenv("TCP_CONN_IDLE_SEC");
+    long v = (e ? std::strtol(e, nullptr, 10) : 30); // 30s 无活动即过期
+    if (v < 1) v = 1; if (v > 3600) v = 3600;
+    return static_cast<uint32_t>(v);
+}
+size_t TCPWindowController::get_state_cap() {
+    const char* e = std::getenv("TCP_STATE_CAP");
+    long v = (e ? std::strtol(e, nullptr, 10) : 50000); // 至多 5 万活跃项
+    if (v < 1000) v = 1000; if (v > 1000000) v = 1000000;
+    return static_cast<size_t>(v);
 }
 
 void TCPWindowController::start() {
@@ -26,7 +53,6 @@ void TCPWindowController::start() {
     setup_iptables_rules();
     LOGI("TCPWindowController started.");
 }
-
 void TCPWindowController::stop() {
     if (!running_) return;
     LOGI("Stopping TCPWindowController...");
@@ -38,7 +64,7 @@ void TCPWindowController::stop() {
     LOGI("Controller stopped.");
 }
 
-// ========== 16-bit 反码和 ==========
+// ==== checksum 工具 ====
 uint16_t TCPWindowController::ip_checksum16(const uint8_t* data, size_t len) {
     uint32_t sum = 0;
     const uint16_t* p = reinterpret_cast<const uint16_t*>(data);
@@ -47,10 +73,8 @@ uint16_t TCPWindowController::ip_checksum16(const uint8_t* data, size_t len) {
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     return static_cast<uint16_t>(~sum);
 }
-
-// ========== TCP 校验和（伪首部 + 头 + 选项 + 载荷） ==========
 uint16_t TCPWindowController::tcp_checksum(struct iphdr* iph, struct tcphdr* tcph, const uint8_t* payload, int payload_len) {
-    (void)payload; (void)payload_len;  // 参数未使用，显式忽略以消除告警
+    (void)payload; (void)payload_len; // 我们按 tot_len 遍历 TCP 段
 
     struct Pseudo {
         uint32_t saddr;
@@ -72,14 +96,12 @@ uint16_t TCPWindowController::tcp_checksum(struct iphdr* iph, struct tcphdr* tcp
 
     uint32_t sum = 0;
 
-    // 伪首部
     const uint8_t* p1 = reinterpret_cast<const uint8_t*>(&psh);
     for (size_t i=0;i<sizeof(Pseudo);i+=2) {
         uint16_t w = (p1[i] << 8) + (i+1 < sizeof(Pseudo) ? p1[i+1] : 0);
         sum += w;
     }
 
-    // TCP 头 + 选项 + 载荷
     const uint8_t* tcp_bytes = reinterpret_cast<const uint8_t*>(tcph);
     int remain = tcp_len;
     while (remain > 1) {
@@ -92,7 +114,7 @@ uint16_t TCPWindowController::tcp_checksum(struct iphdr* iph, struct tcphdr* tcp
     return htons(static_cast<uint16_t>(~sum));
 }
 
-// ========== 改写 Window Scale（SYN/ACK） ==========
+// SYN/ACK 改写 WSCALE=0（只有在启用 tamper_on_synack=true 时才生效）
 void TCPWindowController::rewrite_wscale_option(struct tcphdr* tcph) {
     const int hdr_len = tcph->doff * 4;
     const int bare = sizeof(struct tcphdr);
@@ -109,9 +131,8 @@ void TCPWindowController::rewrite_wscale_option(struct tcphdr* tcph) {
         uint8_t len = opt[i+1];
         if (len < 2 || i + len > opt_len) break;
 
-        // Window Scale: kind=3, len=3
         if (kind == 3 && len == 3) {
-            opt[i+2] = 0; // WS=0
+            opt[i+2] = 0; // WSCALE=0
             LOGD("[WSCALE] Rewrote Window Scale to 0 on SYN-ACK");
             return;
         }
@@ -143,9 +164,93 @@ void TCPWindowController::apply_window_tamper(struct iphdr* iph, struct tcphdr* 
     LOGD(oss.str());
 }
 
+// 自适应：根据同一连接上我们对客户端的 ACK 值，估算客户端请求已被接收多少（acked）
+// - 未达阈值：用 warmup_win
+// - 达到阈值：切换到 target_win（收紧）
+// 注意：仅在 ACK/PSH-ACK 阶段使用；SYN-ACK 是否改窗由 tamper_on_synack 控制
+uint16_t TCPWindowController::pick_window_for_packet(struct iphdr* iph, struct tcphdr* tcph, bool is_synack, bool is_ack_or_psh) {
+    if (is_synack) {
+        if (tamper_on_synack()) {
+            rewrite_wscale_option(tcph);
+            return get_target_win();
+        }
+        return ntohs(tcph->window); // 不动握手窗
+    }
+
+    if (!is_ack_or_psh) {
+        return ntohs(tcph->window);
+    }
+
+    ConnKey key{iph->saddr, iph->daddr, tcph->source, tcph->dest};
+    const uint32_t ack_net = tcph->ack_seq;
+    const uint32_t ack_host = ntohl(ack_net);
+
+    const uint32_t warmup_bytes = get_warmup_bytes();
+    const uint16_t warmup_win   = get_warmup_win();
+    const uint16_t target_win   = get_target_win();
+
+    auto now = std::chrono::steady_clock::now();
+    const auto idle_deadline = std::chrono::seconds(get_conn_idle_sec());
+
+    {
+        std::lock_guard<std::mutex> lk(states_mu_);
+        auto& st = states_[key];
+        st.last_seen = now;
+
+        if (!st.base_set) {
+            st.base_ack = ack_host;
+            st.base_set = true;
+            st.acked    = 0;
+            st.warmed   = false;
+            LOGD("[ADAPT] base_ack set=" + std::to_string(st.base_ack) +
+                 " warmup_bytes=" + std::to_string(warmup_bytes) +
+                 " warmup_win=" + std::to_string(warmup_win) +
+                 " target_win=" + std::to_string(target_win));
+        } else {
+            // 计算 acked = ack_host - base_ack（考虑 32-bit wrap）
+            int64_t diff = static_cast<int64_t>(ack_host) - static_cast<int64_t>(st.base_ack);
+            if (diff < 0) diff += (1ULL << 32);
+            st.acked = static_cast<uint64_t>(diff);
+            if (!st.warmed && st.acked >= warmup_bytes) {
+                st.warmed = true;
+                LOGI("[ADAPT] warmed: acked=" + std::to_string(st.acked) + " >= " + std::to_string(warmup_bytes));
+            }
+        }
+
+        // 选择窗口
+        uint16_t chosen = st.warmed ? target_win : warmup_win;
+        // 简单 GC：容量超限或随机时机清理过期项
+        if (states_.size() > get_state_cap()) {
+            gc_states_if_needed();
+        } else if ((reinterpret_cast<uintptr_t>(this) ^ ack_host) % 1024 == 0) {
+            // 偶尔顺便清一下
+            gc_states_if_needed();
+        }
+        return chosen;
+    }
+}
+
+void TCPWindowController::gc_states_if_needed() {
+    const auto now = std::chrono::steady_clock::now();
+    const auto idle = std::chrono::seconds(get_conn_idle_sec());
+    size_t before = states_.size();
+    for (auto it = states_.begin(); it != states_.end(); ) {
+        if (now - it->second.last_seen > idle) {
+            it = states_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    size_t after = states_.size();
+    if (after < before) {
+        LOGI("[ADAPT] GC: " + std::to_string(before - after) + " stale states removed, remain=" + std::to_string(after));
+    }
+}
+
+// ==== NFQUEUE 回调 ====
 int TCPWindowController::packet_handler(struct nfq_q_handle *qh, struct nfgenmsg *,
                                         struct nfq_data *nfa, void *data) {
-    auto* ctx = static_cast<std::pair<TCPWindowController*,int>*>(data);
+    auto* ctx  = static_cast<std::pair<TCPWindowController*,int>*>(data);
     auto* self = ctx->first;
     const int idx = ctx->second;
 
@@ -158,7 +263,6 @@ int TCPWindowController::packet_handler(struct nfq_q_handle *qh, struct nfgenmsg
         self->queues_stats_[idx].errors++;
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
-
     self->queues_stats_[idx].packets++;
 
     auto* iph = reinterpret_cast<struct iphdr*>(packet_data);
@@ -172,10 +276,9 @@ int TCPWindowController::packet_handler(struct nfq_q_handle *qh, struct nfgenmsg
         self->queues_stats_[idx].errors++;
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
-
     auto* tcph = reinterpret_cast<struct tcphdr*>(packet_data + ip_hl);
 
-    // 仅处理“本机 80 端口发出的响应方向”
+    // 仅处理服务器发出的 80 端口方向
     if (ntohs(tcph->source) != SERVER_PORT) {
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
     }
@@ -186,19 +289,12 @@ int TCPWindowController::packet_handler(struct nfq_q_handle *qh, struct nfgenmsg
     const bool is_synack = is_syn && is_ack;
     const bool is_ack_or_psh = (!is_syn && (is_ack || (is_psh && is_ack)));
 
-    const uint16_t new_win = get_target_win();
+    // 选择窗口
+    uint16_t chosen_win = pick_window_for_packet(iph, tcph, is_synack, is_ack_or_psh);
 
-    if (is_synack && tamper_on_synack()) {
-        // 握手阶段：先把 WSCALE=0，再压窗口
-        rewrite_wscale_option(tcph);
-        apply_window_tamper(iph, tcph, new_win);
-        self->queues_stats_[idx].modified++;
-        return nfq_set_verdict(qh, id, NF_ACCEPT, len, packet_data);
-    }
-
-    if (is_ack_or_psh) {
-        // 已建立会话：持续压窗口
-        apply_window_tamper(iph, tcph, new_win);
+    // 仅在（启用 SYN-ACK tamper）或（ACK/PSH-ACK）时修改
+    if ((is_synack && tamper_on_synack()) || is_ack_or_psh) {
+        apply_window_tamper(iph, tcph, chosen_win);
         self->queues_stats_[idx].modified++;
         return nfq_set_verdict(qh, id, NF_ACCEPT, len, packet_data);
     }
@@ -220,7 +316,7 @@ void TCPWindowController::worker_thread(int queue_num, int idx) {
     }
     if (!h) { LOGF("nfq_open failed after retries"); return; }
 
-    if (nfq_unbind_pf(h, AF_INET) < 0) LOGW("nfq_unbind_pf (ignore if none)");
+    if (nfq_unbind_pf(h, AF_INET) < 0) LOGW("nfq_unbind_pf (ok if none)");
     if (nfq_bind_pf(h, AF_INET) < 0) { LOGE("nfq_bind_pf failed"); nfq_close(h); return; }
 
     auto* ctx = new std::pair<TCPWindowController*,int>(this, idx);
@@ -257,7 +353,8 @@ void TCPWindowController::worker_thread(int queue_num, int idx) {
             s << "[Q" << queue_num << "] Stats: packets=" << queues_stats_[idx].packets
               << " modified=" << queues_stats_[idx].modified
               << " non_tcp="  << queues_stats_[idx].non_tcp
-              << " errors="   << queues_stats_[idx].errors;
+              << " errors="   << queues_stats_[idx].errors
+              << " states="   << states_.size();
             LOGI(s.str());
         }
     }
@@ -270,7 +367,6 @@ void TCPWindowController::worker_thread(int queue_num, int idx) {
 
 void TCPWindowController::setup_iptables_rules() {
     LOGI("Setting iptables NFQUEUE rules...");
-    // 与 Geneva 建议一致：三条（SYN+ACK / ACK / PSH+ACK）
     int r1 = system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
     int r2 = system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
     int r3 = system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
@@ -280,7 +376,6 @@ void TCPWindowController::setup_iptables_rules() {
         << " PA="<< WEXITSTATUS(r3);
     LOGI(oss.str());
 }
-
 void TCPWindowController::cleanup_iptables_rules() {
     LOGI("Cleaning iptables NFQUEUE rules...");
     int r1 = system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");

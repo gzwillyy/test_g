@@ -1,93 +1,118 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="tcp_redirect"
+BIN="/opt/tcp_redirect/tcp_redirect_server"
+SRC_DIR="/opt/tcp_redirect/src"
+SCRIPT_DIR="/opt/tcp_redirect/scripts"
+
+log()  { echo "[DEPLOY] $*"; }
+err()  { echo "[DEPLOY][ERROR] $*" >&2; }
+ok()   { echo "[DEPLOY][OK] $*"; }
+
+# 0) 以 root 运行检查
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  err "Please run as root"; exit 1
+fi
 
 echo "=== TCP Redirect Server Deployment (Debian 12) ==="
 
-mkdir -p /opt/tcp_redirect/{logs,backup}
+# 1) 停止现有服务
+log "Stop existing service (if any)..."
+systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+pkill -f "${BIN}" 2>/dev/null || true
 
-echo "[DEPLOY] Stop existing service (if any)..."
-systemctl stop tcp_redirect 2>/dev/null || true
-pkill -f tcp_redirect_server 2>/dev/null || true
-
-echo "[DEPLOY] Clean iptables NFQUEUE rules..."
+# 2) 清理旧的 iptables 规则（避免重复）
+log "Clean iptables NFQUEUE rules..."
 iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null || true
-iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null || true
+iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK         -j NFQUEUE --queue-num 1001 2>/dev/null || true
 iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null || true
 
-echo "[DEPLOY] Build..."
-/opt/tcp_redirect/scripts/build.sh
+# 3) 编译
+log "Build..."
+"${SCRIPT_DIR}/build.sh"
+ok "OK -> ${BIN}"
 
-echo "[DEPLOY] Ensure kernel modules autoload..."
-cat >/etc/modules-load.d/tcp_redirect.conf <<'EOF'
-nfnetlink
-nfnetlink_queue
-EOF
-modprobe nfnetlink        2>/dev/null || true
-modprobe nfnetlink_queue  2>/dev/null || true
-
-echo "[DEPLOY] Create/Update systemd service..."
-cat >/etc/systemd/system/tcp_redirect.service <<'EOF'
+# 4) 生成 systemd unit（包含自适应预热相关环境变量）
+log "Create/Update systemd service..."
+cat > /etc/systemd/system/${SERVICE_NAME}.service <<'UNIT'
 [Unit]
-Description=TCP Redirect Server with NFQUEUE Window Control
-After=network.target
+Description=TCP Redirect Server with NFQUEUE Window Control (adaptive warmup)
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/tcp_redirect
-# ☆ 业务参数（可改）：窗口默认 1；是否改 SYN+ACK=1
-Environment=TCP_REDIRECT_LOG_LEVEL=DEBUG
-Environment=TCP_TAMPER_WINDOW=1
-Environment=TCP_TAMPER_ON_SYNACK=1
 
-# 预加载内核模块（容错）
-ExecStartPre=/bin/sh -c '/sbin/modprobe nfnetlink 2>/dev/null || /usr/sbin/modprobe nfnetlink 2>/dev/null || true'
-ExecStartPre=/bin/sh -c '/sbin/modprobe nfnetlink_queue 2>/dev/null || /usr/sbin/modprobe nfnetlink_queue 2>/dev/null || true'
+# 启动前确保内核模块就绪（NFQUEUE 依赖 AF_NETLINK）
+ExecStartPre=/sbin/modprobe nfnetlink
+ExecStartPre=/sbin/modprobe nfnetlink_queue
 
+# 程序路径
 ExecStart=/opt/tcp_redirect/tcp_redirect_server
+
+# —— 环境变量：自适应预热 & 日志 & 行为控制 ——
+# 握手阶段是否改窗（方案A默认关闭，避免公网 RST）
+Environment=TCP_TAMPER_ON_SYNACK=0
+# 预热阈值（累计 ACK 到多少字节后收紧）
+Environment=TCP_WARMUP_BYTES=512
+# 预热窗口（较大一些，促使请求头尽快推完）
+Environment=TCP_WARMUP_WINDOW=4096
+# 收紧后的目标窗口（“抢答模式”）
+Environment=TCP_TAMPER_WINDOW=20
+# 会话空闲回收、状态容量
+Environment=TCP_CONN_IDLE_SEC=30
+Environment=TCP_STATE_CAP=50000
+
+# 允许我们设置 iptables / 使用原始套接字 / 绑定 80 端口
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# NFQUEUE 需要 AF_NETLINK；HTTP 需要 AF_INET/AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+
+# 一些合理的约束（不要过度收紧以免影响 NFQUEUE）
+PrivateTmp=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectSystem=full
+ProtectHome=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# 资源与重启策略
+LimitNOFILE=1048576
+TasksMax=infinity
 Restart=always
-RestartSec=3
+RestartSec=2
+
 StandardOutput=journal
 StandardError=journal
 
-# 能力与 sandbox（务必放开 AF_NETLINK）
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-PrivateDevices=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
-
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT
 
-echo "[DEPLOY] Reload systemd..."
+# 5) 重新加载 systemd
+log "Reload systemd..."
 systemctl daemon-reload
 
-echo "[DEPLOY] Open firewall (port 80)..."
-ufw allow 80/tcp 2>/dev/null || true
-iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+# 6) 基础防火墙放行 80（有 ufw 用 ufw，没装则用 iptables 兜底）
+log "Open firewall (port 80)..."
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow 80/tcp || true
+else
+  iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+fi
 
-echo "[DEPLOY] Start & Enable service..."
-systemctl start tcp_redirect
-systemctl enable tcp_redirect 2>/dev/null || true
-
-echo "[DEPLOY] Status:"
-systemctl status tcp_redirect --no-pager || true
-echo "[DEPLOY] Done."
-
-
-
-
-# 部署后可启用 nft 规则（任选其一方案；以下仅示例）
-# nft add table inet tcpredir || true
-# nft 'add chain inet tcpredir out { type filter hook output priority 0; }' || true
-# nft 'add rule inet tcpredir out tcp sport 80 tcp flags syn,ack queue num 1000' || true
-# nft 'add rule inet tcpredir out tcp sport 80 tcp flags ack queue num 1001' || true
-# nft 'add rule inet tcpredir out tcp sport 80 tcp flags psh,ack queue num 1002' || true
-# 删除： nft delete table inet tcpredir
+# 7) 完成提示
+ok "Done."
+echo "Start:   systemctl start ${SERVICE_NAME}"
+echo "Enable:  systemctl enable ${SERVICE_NAME}"
+echo "Status:  systemctl status ${SERVICE_NAME} --no-pager"
