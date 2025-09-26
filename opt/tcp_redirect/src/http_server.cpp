@@ -25,6 +25,7 @@ public:
     }
 
     std::string build_redirect_page(const std::string& host) {
+        (void)host; // 当前未用到 host，避免未使用告警
         std::string html =
 R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
 <script>
@@ -81,7 +82,7 @@ const map = {
             setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
 #endif
             // 同步写
-            boost::system::error_code ec;
+            asio::error_code ec;
             asio::write(*sock, asio::buffer(resp), ec);
 #ifdef TCP_CORK
             on = 0; setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
