@@ -42,6 +42,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+WorkingDirectory=/
 Type=simple
 User=root
 WorkingDirectory=/opt/tcp_redirect
