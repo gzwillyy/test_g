@@ -49,7 +49,7 @@ private:
             uint8_t  placeholder;
             uint8_t  protocol;
             uint16_t tcp_length;
-        } psh;
+        } psh{};
 
         const int ip_header_len  = iph->ihl * 4;
         const int tcp_header_len = tcph->doff * 4;

@@ -1,14 +1,8 @@
 #include "common.h"
 
-// 直接把控制器实现并入本编译单元，避免不完整类型问题
-#include "tcp_window_controller.cpp"
+#include "tcp_window_controller.cpp"  // 并入：避免不完整类型问题
+#include "http_server.cpp"            // 并入：避免链接器找不到 HTTPServer 定义
 
-// HTTP 服务器在另一个编译单元，声明即可（链接时会找到）
-class HTTPServer {
-public:
-    explicit HTTPServer(short port);
-    void run();
-};
 
 static std::unique_ptr<TCPWindowController> g_controller;
 
