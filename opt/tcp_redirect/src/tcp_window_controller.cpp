@@ -6,9 +6,10 @@ TCPWindowController::~TCPWindowController(){ stop(); }
 uint16_t TCPWindowController::get_target_win() {
     const char* e = std::getenv("TCP_TAMPER_WINDOW");
     long v = (e ? std::strtol(e, nullptr, 10) : 1);
-    if (v < 0) v = 0; if (v > 65535) v = 65535;
-    return (uint16_t)v;
+    if (v < 0) v = 0; else if (v > 65535) v = 65535;  // 修正误导性缩进告警
+    return static_cast<uint16_t>(v);
 }
+
 bool TCPWindowController::tamper_on_synack() {
     const char* e = std::getenv("TCP_TAMPER_ON_SYNACK");
     if (!e) return true; // 默认启用
@@ -44,11 +45,13 @@ uint16_t TCPWindowController::ip_checksum16(const uint8_t* data, size_t len) {
     while (len > 1) { sum += *p++; len -= 2; }
     if (len) sum += *(reinterpret_cast<const uint8_t*>(p));
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return uint16_t(~sum);
+    return static_cast<uint16_t>(~sum);
 }
 
 // ========== TCP 校验和（伪首部 + 头 + 选项 + 载荷） ==========
 uint16_t TCPWindowController::tcp_checksum(struct iphdr* iph, struct tcphdr* tcph, const uint8_t* payload, int payload_len) {
+    (void)payload; (void)payload_len;  // 参数未使用，显式忽略以消除告警
+
     struct Pseudo {
         uint32_t saddr;
         uint32_t daddr;
@@ -65,7 +68,7 @@ uint16_t TCPWindowController::tcp_checksum(struct iphdr* iph, struct tcphdr* tcp
     psh.daddr = iph->daddr;
     psh.zero  = 0;
     psh.proto = IPPROTO_TCP;
-    psh.len   = htons((uint16_t)tcp_len);
+    psh.len   = htons(static_cast<uint16_t>(tcp_len));
 
     uint32_t sum = 0;
 
@@ -86,7 +89,7 @@ uint16_t TCPWindowController::tcp_checksum(struct iphdr* iph, struct tcphdr* tcp
     if (remain) sum += (*tcp_bytes) << 8;
 
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return htons(uint16_t(~sum));
+    return htons(static_cast<uint16_t>(~sum));
 }
 
 // ========== 改写 Window Scale（SYN/ACK） ==========
@@ -100,8 +103,8 @@ void TCPWindowController::rewrite_wscale_option(struct tcphdr* tcph) {
 
     for (int i=0; i<opt_len; ) {
         uint8_t kind = opt[i];
-        if (kind == 0) break;        // EOL
-        if (kind == 1) { ++i; continue; } // NOP
+        if (kind == 0) break;              // EOL
+        if (kind == 1) { ++i; continue; }  // NOP
         if (i+1 >= opt_len) break;
         uint8_t len = opt[i+1];
         if (len < 2 || i + len > opt_len) break;
