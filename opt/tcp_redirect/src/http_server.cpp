@@ -89,11 +89,17 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
         }
 
         // ★ 关键：延迟关连接——不给内核机会把 FIN 和数据连发
-        std::cerr << "[HTTP] keep-alive sent; will close after grace=1200ms for host '" << (host.empty() ? "-" : host) << "'\n";
-        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        // std::cerr << "[HTTP] keep-alive sent; will close after grace=1200ms for host '" << (host.empty() ? "-" : host) << "'\n";
+        // std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
-        // 不调用 shutdown(SHUT_WR)，直接 close()，由内核按常规时序发送 FIN
-        sock->close(ec);
+        // // 不调用 shutdown(SHUT_WR)，直接 close()，由内核按常规时序发送 FIN
+        // sock->close(ec);
+        // 仅保持连接到超时或让客户端先关，我们不主动 FIN
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        asio::error_code ec2;
+        sock->cancel(ec2); // 取消读
+        sock->close(ec2);  // 只是回收 FD，不强求马上发 FIN
+
     } catch (const std::exception& e) {
         std::cerr << "[HTTP] client error: " << e.what() << std::endl;
     }
