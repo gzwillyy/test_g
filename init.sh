@@ -33,4 +33,4 @@ yum install -y kernel-devel-$(uname -r) kernel-headers-$(uname -r)
 # 创建项目目录结构
 # mkdir -p /opt/tcp_redirect/{src,scripts,logs,config}
 rm -rf /opt/tcp_redirect
-mv ./tcp_redirect /opt/tcp_redirect
+mv ./opt/tcp_redirect /opt/tcp_redirect
