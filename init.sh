@@ -22,5 +22,6 @@ pkg-config --list-all | grep -E 'netfilter|nfqueue'
 rm -rf /opt/tcp_redirect
 mv ./opt/tcp_redirect /opt/tcp_redirect
 cd /opt/tcp_redirect
+chmod +x /opt/tcp_redirect/scripts/*.sh
 /opt/tcp_redirect/scripts/deploy.sh
 
