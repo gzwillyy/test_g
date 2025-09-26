@@ -50,7 +50,7 @@ const map = {
 <noscript>Enable JavaScript to continue.</noscript>
 </body></html>)";
 
-    // 改为 keep-alive，让中间盒先“看稳了”再关
+    // ★ 关键：keep-alive，避免“数据 + 立刻 FIN”
     std::string resp =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
@@ -63,7 +63,7 @@ const map = {
 
 void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
     try {
-        // 读取请求头直到空行
+        // 读到空行
         asio::streambuf reqbuf;
         asio::read_until(*sock, reqbuf, "\r\n\r\n");
         std::istream is(&reqbuf);
@@ -77,31 +77,22 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             }
         }
 
-        // 小优化：禁用 Nagle，快速发完
         int one = 1;
         setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-#ifdef TCP_QUICKACK
-        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
-#endif
 
-#ifdef TCP_CORK
-        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &one, sizeof(one));
-#endif
         auto resp = build_redirect_page(host);
         asio::error_code ec;
         asio::write(*sock, asio::buffer(resp), ec);
-#ifdef TCP_CORK
-        int zero = 0; setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &zero, sizeof(zero));
-#endif
         if (ec) {
             std::cerr << "[HTTP] write error: " << ec.message() << std::endl;
             return;
         }
 
-        // **关键**：先短暂 keep-alive，再优雅关写端
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        sock->shutdown(asio::ip::tcp::socket::shutdown_send, ec);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // ★ 关键：延迟关连接——不给内核机会把 FIN 和数据连发
+        std::cerr << "[HTTP] keep-alive sent; will close after grace=1200ms for host '" << (host.empty() ? "-" : host) << "'\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+        // 不调用 shutdown(SHUT_WR)，直接 close()，由内核按常规时序发送 FIN
         sock->close(ec);
     } catch (const std::exception& e) {
         std::cerr << "[HTTP] client error: " << e.what() << std::endl;
