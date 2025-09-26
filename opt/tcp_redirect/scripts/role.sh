@@ -12,7 +12,7 @@ systemctl status tcp_redirect --no-pager
 iptables -S OUTPUT | grep NFQUEUE
 
 # 启动服务
-systemctl start tcp_redirect
+systemctl restart tcp_redirect
 
 # 设置开机自启
 systemctl enable tcp_redirect
