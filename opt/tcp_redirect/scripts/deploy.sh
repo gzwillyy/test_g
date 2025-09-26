@@ -54,6 +54,7 @@ ExecStartPre=/sbin/modprobe nfnetlink_queue
 ExecStart=/opt/tcp_redirect/tcp_redirect_server
 
 # —— 环境变量：自适应预热 & 日志 & 行为控制 ——
+Environment=TCP_REDIRECT_LOG_LEVEL=DEBUG
 # 握手阶段是否改窗（方案A默认关闭，避免公网 RST）
 Environment=TCP_TAMPER_ON_SYNACK=0
 # 预热阈值（累计 ACK 到多少字节后收紧）
