@@ -1,11 +1,14 @@
-# 检查内核模块
-lsmod | grep nfnetlink
+# 实时日志
+journalctl -u tcp_redirect -f
 
-# 检查库依赖
-ldd /opt/tcp_redirect/tcp_redirect_server
+# 近1小时日志
+journalctl -u tcp_redirect --since "1 hour ago"
 
-# 检查系统日志
-dmesg | tail
+# 最近100行
+journalctl -u tcp_redirect -n 100 --no-pager
 
-# 手动运行测试（调试模式）
-/opt/tcp_redirect/tcp_redirect_server
+# NFQUEUE 统计（iptables）
+iptables -L OUTPUT -v -n | grep NFQUEUE
+
+# 网络流量监控
+tcpdump -ni any port 80 -vv

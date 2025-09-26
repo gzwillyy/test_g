@@ -1,17 +1,18 @@
 #!/bin/bash
-
+set -e
 echo "=== Performance Monitoring ==="
-echo "CPU Usage:"
+
+echo "[CPU Top 5]"
 ps aux --sort=-%cpu | head -5
+echo
 
-echo ""
-echo "Memory Usage:"
+echo "[MEM Top 5]"
 ps aux --sort=-%mem | head -5
+echo
 
-echo ""
-echo "Network Connections:"
-ss -tlnp | grep :80
+echo "[Network :80]"
+ss -tlnp | grep ':80' || echo "No listener"
+echo
 
-echo ""
-echo "Packet Queue Status:"
+echo "[NFQUEUE kernel stats]"
 cat /proc/net/netfilter/nfnetlink_queue 2>/dev/null || echo "NFQUEUE stats not available"

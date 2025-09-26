@@ -1,46 +1,43 @@
 #!/bin/bash
+set -e
+echo "=== Testing TCP Redirect Server ==="
 
-echo "=== Testing TCP Redirect Server on Debian 12 ==="
-
-# 测试HTTP服务
-echo "1. Testing HTTP server on port 80..."
-curl -s -I http://localhost/ > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "✓ HTTP Server: OK"
+echo "[1] HTTP service on :80"
+if curl -s -I http://127.0.0.1/ >/dev/null; then
+  echo " ✓ HTTP Server: OK"
 else
-    echo "✗ HTTP Server: FAILED"
+  echo " ✗ HTTP Server: FAILED"
 fi
 
-# 测试iptables规则
-echo "2. Checking iptables rules..."
-if iptables -L OUTPUT -n 2>/dev/null | grep -q "NFQUEUE"; then
-    echo "✓ iptables rules: OK"
+echo "[2] iptables NFQUEUE rules"
+if iptables -L OUTPUT -n 2>/dev/null | grep -q NFQUEUE; then
+  echo " ✓ iptables rules: OK"
 else
-    echo "✗ iptables rules: MISSING"
+  echo " ✗ iptables rules: MISSING"
 fi
 
-# 测试进程运行
-echo "3. Checking running processes..."
-if pgrep -f tcp_redirect_server > /dev/null; then
-    echo "✓ Process: RUNNING"
+echo "[3] Process running?"
+if pgrep -f tcp_redirect_server >/dev/null; then
+  echo " ✓ Process: RUNNING"
 else
-    echo "✗ Process: STOPPED"
+  echo " ✗ Process: STOPPED"
 fi
 
-# 测试网络连接
-echo "4. Testing network connectivity..."
-if netstat -tln 2>/dev/null | grep -q ":80 "; then
-    echo "✓ Port 80: LISTENING"
+echo "[4] Port :80 listening"
+if ss -tln 2>/dev/null | grep -q ":80 "; then
+  echo " ✓ Port 80: LISTENING"
 else
-    echo "✗ Port 80: NOT LISTENING"
+  echo " ✗ Port 80: NOT LISTENING"
 fi
 
-# 测试TCP窗口修改功能
-echo "5. Testing TCP packet capture..."
-if tcpdump -i any -c 1 port 80 2>/dev/null | grep -q "tcp"; then
-    echo "✓ TCP packet capture: WORKING"
+echo "[5] tcpdump capture 1 packet (3s timeout)"
+if timeout 3 tcpdump -ni any -c 1 port 80 >/dev/null 2>&1; then
+  echo " ✓ tcpdump: OK"
 else
-    echo "✗ TCP packet capture: NOT WORKING"
+  echo " ✗ tcpdump: NO PACKET"
 fi
 
-echo "=== Test completed ==="
+echo "[6] NFQUEUE counters (iptables)"
+iptables -L OUTPUT -v -n 2>/dev/null | grep NFQUEUE || echo " (no counters)"
+
+echo "=== Test done ==="

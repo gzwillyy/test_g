@@ -1,244 +1,259 @@
-// /opt/tcp_redirect/src/tcp_window_controller.cpp
 #include "common.h"
 
 class TCPWindowController {
-private:
-    std::atomic<bool> running_{true};
-    std::thread workers_[3];
-    
 public:
-    ~TCPWindowController() {
-        stop();
-    }
-
-    // TCP校验和计算
-    unsigned short compute_tcp_checksum(struct iphdr* iph, struct tcphdr* tcph, unsigned char* payload, int payload_len) {
-        unsigned long sum = 0;
-        unsigned char* tcp_ptr = (unsigned char*)tcph;
-
-        struct pseudo_header {
-            unsigned int src_addr;
-            unsigned int dest_addr;
-            unsigned char placeholder;
-            unsigned char protocol;
-            unsigned short tcp_length;
-        } psh;
-
-        psh.src_addr = iph->saddr;
-        psh.dest_addr = iph->daddr;
-        psh.placeholder = 0;
-        psh.protocol = IPPROTO_TCP;
-        psh.tcp_length = htons(ntohs(iph->tot_len) - iph->ihl * 4);
-
-        unsigned char pseudo_buf[12];
-        memcpy(pseudo_buf, &psh, sizeof(psh));
-
-        for (int i = 0; i < 12; i += 2) {
-            unsigned short word = (pseudo_buf[i] << 8) + pseudo_buf[i + 1];
-            sum += word;
-        }
-
-        tcph->check = 0;
-        for (int i = 0; i < tcph->doff * 4; i += 2) {
-            if (i + 1 < tcph->doff * 4) {
-                unsigned short word = (tcp_ptr[i] << 8) + tcp_ptr[i + 1];
-                sum += word;
-            } else {
-                sum += (tcp_ptr[i] << 8);
-            }
-        }
-
-        if (payload && payload_len > 0) {
-            for (int i = 0; i < payload_len; i += 2) {
-                if (i + 1 < payload_len) {
-                    unsigned short word = (payload[i] << 8) + payload[i + 1];
-                    sum += word;
-                } else {
-                    sum += (payload[i] << 8);
-                }
-            }
-        }
-
-        while (sum >> 16) {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-
-        return (unsigned short)(~sum);
-    }
-
-    void modify_tcp_window(struct iphdr* iph, struct tcphdr* tcph, uint16_t new_window) {
-        uint16_t old_window = ntohs(tcph->window);
-        tcph->window = htons(new_window);
-        
-        unsigned char* payload = nullptr;
-        int payload_len = 0;
-        
-        int ip_header_len = iph->ihl * 4;
-        int tcp_header_len = tcph->doff * 4;
-        int total_len = ntohs(iph->tot_len);
-        
-        if (total_len > ip_header_len + tcp_header_len) {
-            payload = (unsigned char*)iph + ip_header_len + tcp_header_len;
-            payload_len = total_len - ip_header_len - tcp_header_len;
-        }
-        
-        tcph->check = compute_tcp_checksum(iph, tcph, payload, payload_len);
-        
-        std::cout << "[DEBUG] Modified TCP window from " << old_window << " to " << new_window 
-                  << " for packet with flags: 0x" << std::hex << (int)tcph->flags 
-                  << std::dec << std::endl;
-    }
-
-    static int packet_handler(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
-                             struct nfq_data *nfa, void *data) {
-        TCPWindowController* controller = static_cast<TCPWindowController*>(data);
-        int id = 0;
-        struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
-        
-        if (ph) {
-            id = ntohl(ph->packet_id);
-        }
-        
-        unsigned char *packet_data;
-        int len = nfq_get_payload(nfa, &packet_data);
-        
-        if (len < (int)sizeof(struct iphdr)) {
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-        }
-        
-        struct iphdr *iph = (struct iphdr*)packet_data;
-        
-        if (iph->protocol == IPPROTO_TCP) {
-            int ip_header_len = iph->ihl * 4;
-            
-            if (len < ip_header_len + (int)sizeof(struct tcphdr)) {
-                return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-            }
-            
-            struct tcphdr *tcph = (struct tcphdr*)(packet_data + ip_header_len);
-            
-            if (ntohs(tcph->source) == SERVER_PORT) {
-                uint16_t new_window = TARGET_WINDOW_SIZE;
-                
-                if ((tcph->syn && tcph->ack) || (tcph->ack && !tcph->syn) || (tcph->psh && tcph->ack)) {
-                    controller->modify_tcp_window(iph, tcph, new_window);
-                    return nfq_set_verdict(qh, id, NF_ACCEPT, len, packet_data);
-                }
-            }
-        }
-        
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-    }
-
-    void worker_thread(int queue_num) {
-        std::cout << "[INFO] Starting NFQUEUE worker for queue " << queue_num << std::endl;
-        
-        struct nfq_handle *h = nfq_open();
-        if (!h) {
-            std::cerr << "[ERROR] Error opening NFQUEUE handle for queue " << queue_num << std::endl;
-            return;
-        }
-        
-        if (nfq_unbind_pf(h, AF_INET) < 0) {
-            std::cerr << "[WARN] Error unbinding existing handler for queue " << queue_num << std::endl;
-        }
-        
-        if (nfq_bind_pf(h, AF_INET) < 0) {
-            std::cerr << "[ERROR] Error binding to AF_INET for queue " << queue_num << std::endl;
-            nfq_close(h);
-            return;
-        }
-        
-        struct nfq_q_handle *qh = nfq_create_queue(h, queue_num, &packet_handler, this);
-        if (!qh) {
-            std::cerr << "[ERROR] Error creating queue " << queue_num << std::endl;
-            nfq_close(h);
-            return;
-        }
-        
-        if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xFFFF) < 0) {
-            std::cerr << "[ERROR] Error setting packet copy mode for queue " << queue_num << std::endl;
-            nfq_destroy_queue(qh);
-            nfq_close(h);
-            return;
-        }
-        
-        int fd = nfq_fd(h);
-        int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        
-        std::cout << "[INFO] NFQUEUE worker " << queue_num << " started successfully" << std::endl;
-        
-        char buffer[65536];
-        struct timeval timeout;
-        fd_set read_set;
-        
-        while (running_) {
-            FD_ZERO(&read_set);
-            FD_SET(fd, &read_set);
-            
-            timeout.tv_sec = 1;
-            timeout.tv_usec = 0;
-            
-            int rv = select(fd + 1, &read_set, NULL, NULL, &timeout);
-            
-            if (rv > 0 && FD_ISSET(fd, &read_set)) {
-                int recv_len = recv(fd, buffer, sizeof(buffer), 0);
-                if (recv_len > 0) {
-                    nfq_handle_packet(h, buffer, recv_len);
-                }
-            } else if (rv < 0 && errno != EINTR) {
-                break;
-            }
-        }
-        
-        nfq_destroy_queue(qh);
-        nfq_close(h);
-    }
+    TCPWindowController() = default;
+    ~TCPWindowController(){ stop(); }
 
     void start() {
-        std::cout << "[INFO] Starting TCP Window Controller..." << std::endl;
-        
-        for (int i = 0; i < 3; ++i) {
-            workers_[i] = std::thread(&TCPWindowController::worker_thread, this, NFQUEUE_NUM[i]);
+        LOGI("Starting TCPWindowController...");
+        for (int i = 0; i < NFQUEUE_COUNT; ++i) {
+            queues_stats_[i] = {};
+            workers_[i] = std::thread(&TCPWindowController::worker_thread, this, NFQUEUE_NUM[i], i);
         }
-        
         setup_iptables_rules();
-        std::cout << "[INFO] TCP Window Controller started successfully" << std::endl;
+        LOGI("TCPWindowController started.");
     }
 
     void stop() {
-        std::cout << "[INFO] Stopping TCP Window Controller..." << std::endl;
+        if (!running_) return;
+        LOGI("Stopping TCPWindowController...");
         running_ = false;
-        
-        for (int i = 0; i < 3; ++i) {
-            if (workers_[i].joinable()) {
-                workers_[i].join();
-            }
+        for (int i = 0; i < NFQUEUE_COUNT; ++i) {
+            if (workers_[i].joinable()) workers_[i].join();
         }
-        
         cleanup_iptables_rules();
-        std::cout << "[INFO] TCP Window Controller stopped" << std::endl;
+        LOGI("Controller stopped.");
     }
 
 private:
+    struct QueueStats {
+        std::atomic<uint64_t> packets{0};
+        std::atomic<uint64_t> modified{0};
+        std::atomic<uint64_t> errors{0};
+        std::atomic<uint64_t> non_tcp{0};
+    };
+
+    std::atomic<bool> running_{true};
+    std::thread workers_[NFQUEUE_COUNT];
+    QueueStats queues_stats_[NFQUEUE_COUNT];
+
+    static unsigned short compute_tcp_checksum(struct iphdr* iph, struct tcphdr* tcph,
+                                        unsigned char* payload, int payload_len) {
+        unsigned long sum = 0;
+
+        struct pseudo_header {
+            uint32_t src_addr;
+            uint32_t dest_addr;
+            uint8_t  placeholder;
+            uint8_t  protocol;
+            uint16_t tcp_length;
+        } psh;
+
+        const int ip_header_len  = iph->ihl * 4;
+        const int tcp_header_len = tcph->doff * 4;
+        const int total_len      = ntohs(iph->tot_len);
+        const int tcp_len        = std::max(0, total_len - ip_header_len);
+
+        psh.src_addr   = iph->saddr;
+        psh.dest_addr  = iph->daddr;
+        psh.placeholder= 0;
+        psh.protocol   = IPPROTO_TCP;
+        psh.tcp_length = htons((uint16_t)tcp_len);
+
+        // 伪首部
+        const uint16_t* p = reinterpret_cast<uint16_t*>(&psh);
+        for (size_t i = 0; i < sizeof(psh)/2; ++i) sum += ntohs(p[i]);
+
+        // TCP 头
+        tcph->check = 0;
+        const unsigned char* tcp_ptr = reinterpret_cast<unsigned char*>(tcph);
+        for (int i = 0; i < tcp_header_len; i += 2) {
+            uint16_t word = (tcp_ptr[i] << 8) + (i + 1 < tcp_header_len ? tcp_ptr[i + 1] : 0);
+            sum += word;
+        }
+
+        // 载荷
+        if (payload && payload_len > 0) {
+            for (int i = 0; i < payload_len; i += 2) {
+                uint16_t word = (payload[i] << 8) + (i + 1 < payload_len ? payload[i + 1] : 0);
+                sum += word;
+            }
+        }
+
+        while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+        return htons((uint16_t)(~sum));
+    }
+
+    static int packet_handler(struct nfq_q_handle *qh, struct nfgenmsg *,
+                              struct nfq_data *nfa, void *data) {
+        auto* ctx = static_cast<std::pair<TCPWindowController*,int>*>(data);
+        auto* self = ctx->first;
+        const int idx = ctx->second;
+
+        int id = 0;
+        if (auto* ph = nfq_get_msg_packet_hdr(nfa)) id = ntohl(ph->packet_id);
+
+        unsigned char *packet_data = nullptr;
+        const int len = nfq_get_payload(nfa, &packet_data);
+        if (len < (int)sizeof(struct iphdr)) {
+            self->queues_stats_[idx].errors++;
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        }
+
+        self->queues_stats_[idx].packets++;
+
+        auto* iph = reinterpret_cast<struct iphdr*>(packet_data);
+        if (iph->protocol != IPPROTO_TCP) {
+            self->queues_stats_[idx].non_tcp++;
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        }
+
+        const int ip_header_len = iph->ihl * 4;
+        if (len < ip_header_len + (int)sizeof(struct tcphdr)) {
+            self->queues_stats_[idx].errors++;
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        }
+
+        auto* tcph = reinterpret_cast<struct tcphdr*>(packet_data + ip_header_len);
+
+        // 仅处理本机 80 源端口（响应方向）
+        if (ntohs(tcph->source) == SERVER_PORT) {
+            const bool is_synack = tcph->syn && tcph->ack;
+            const bool is_ack    = tcph->ack && !tcph->syn;
+            const bool is_pshack = tcph->psh && tcph->ack;
+
+            if (is_synack || is_ack || is_pshack) {
+                const uint16_t old_window = ntohs(tcph->window);
+                // payload 计算
+                const int tcp_header_len = tcph->doff * 4;
+                const int total_len      = ntohs(iph->tot_len);
+
+                unsigned char* payload = nullptr;
+                int payload_len = 0;
+                if (total_len > ip_header_len + tcp_header_len) {
+                    payload     = reinterpret_cast<unsigned char*>(iph) + ip_header_len + tcp_header_len;
+                    payload_len = total_len - ip_header_len - tcp_header_len;
+                }
+
+                tcph->window = htons(TARGET_WINDOW_SIZE);
+                tcph->check  = compute_tcp_checksum(iph, tcph, payload, payload_len);
+
+                self->queues_stats_[idx].modified++;
+
+                std::ostringstream oss;
+                oss << "[Q" << NFQUEUE_NUM[idx] << "] "
+                    << "Modify win " << old_window << " -> " << TARGET_WINDOW_SIZE
+                    << " flags["
+                    << (tcph->syn ? "SYN " : "")
+                    << (tcph->ack ? "ACK " : "")
+                    << (tcph->psh ? "PSH " : "")
+                    << (tcph->fin ? "FIN " : "")
+                    << (tcph->rst ? "RST " : "")
+                    << "] s=" << inet_ntoa(*(in_addr*)&iph->saddr)
+                    << ":" << ntohs(tcph->source)
+                    << " d=" << inet_ntoa(*(in_addr*)&iph->daddr)
+                    << ":" << ntohs(tcph->dest);
+                LOGD(oss.str());
+
+                return nfq_set_verdict(qh, id, NF_ACCEPT, len, packet_data);
+            }
+        }
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    }
+
+    void worker_thread(int queue_num, int idx) {
+        std::ostringstream oss; oss << "NFQUEUE worker start for queue " << queue_num << " (idx " << idx << ")";
+        LOGI(oss.str());
+
+        struct nfq_handle *h = nfq_open();
+        if (!h) { LOGE("nfq_open failed"); return; }
+
+        if (nfq_unbind_pf(h, AF_INET) < 0) LOGW("nfq_unbind_pf (ignore if none)");
+
+        if (nfq_bind_pf(h, AF_INET) < 0) {
+            LOGE("nfq_bind_pf failed");
+            nfq_close(h);
+            return;
+        }
+
+        // 为 packet_handler 附带 idx
+        auto* ctx = new std::pair<TCPWindowController*,int>(this, idx);
+        struct nfq_q_handle *qh = nfq_create_queue(h, queue_num, &packet_handler, ctx);
+        if (!qh) {
+            LOGE("nfq_create_queue failed");
+            nfq_close(h);
+            delete ctx;
+            return;
+        }
+
+        if (nfq_set_mode(qh, NFQNL_COPY_PACKET, 0xFFFF) < 0) {
+            LOGE("nfq_set_mode failed");
+            nfq_destroy_queue(qh);
+            nfq_close(h);
+            delete ctx;
+            return;
+        }
+
+        int fd = nfq_fd(h);
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+        auto last_report = std::chrono::steady_clock::now();
+        char buffer[65536];
+
+        while (running_) {
+            fd_set rset; FD_ZERO(&rset); FD_SET(fd, &rset);
+            struct timeval tv{1,0};
+            const int rv = select(fd + 1, &rset, nullptr, nullptr, &tv);
+            if (rv > 0 && FD_ISSET(fd, &rset)) {
+                int n = recv(fd, buffer, sizeof(buffer), 0);
+                if (n > 0) nfq_handle_packet(h, buffer, n);
+            } else if (rv < 0 && errno != EINTR) {
+                LOGE("select error on NFQUEUE fd");
+                break;
+            }
+
+            // 周期性队列统计
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_report > std::chrono::seconds(5)) {
+                last_report = now;
+                std::ostringstream s;
+                s << "[Q" << queue_num << "] Stats: packets=" << queues_stats_[idx].packets
+                  << " modified=" << queues_stats_[idx].modified
+                  << " non_tcp="  << queues_stats_[idx].non_tcp
+                  << " errors="   << queues_stats_[idx].errors;
+                LOGI(s.str());
+            }
+        }
+
+        nfq_destroy_queue(qh);
+        nfq_close(h);
+        delete ctx;
+        LOGI("NFQUEUE worker exit for queue " + std::to_string(queue_num));
+    }
+
     void setup_iptables_rules() {
-        std::cout << "[INFO] Setting up iptables rules..." << std::endl;
-        
-        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
-        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
-        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
-        
-        std::cout << "[INFO] Iptables rules set up successfully" << std::endl;
+        LOGI("Setting iptables NFQUEUE rules...");
+        int r1 = system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
+        int r2 = system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
+        int r3 = system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
+        std::ostringstream oss;
+        oss << "iptables set results: SYN-ACK="<< WEXITSTATUS(r1)
+            << " ACK="<< WEXITSTATUS(r2)
+            << " PSH-ACK="<< WEXITSTATUS(r3);
+        LOGI(oss.str());
     }
 
     void cleanup_iptables_rules() {
-        std::cout << "[INFO] Cleaning up iptables rules..." << std::endl;
-        
-        system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
-        system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
-        system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
-        
-        std::cout << "[INFO] Iptables rules cleaned up" << std::endl;
+        LOGI("Cleaning iptables NFQUEUE rules...");
+        int r1 = system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
+        int r2 = system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
+        int r3 = system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
+        std::ostringstream oss;
+        oss << "iptables del results: SYN-ACK="<< WEXITSTATUS(r1)
+            << " ACK="<< WEXITSTATUS(r2)
+            << " PSH-ACK="<< WEXITSTATUS(r3);
+        LOGI(oss.str());
     }
 };

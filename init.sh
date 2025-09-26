@@ -1,22 +1,21 @@
 # 更新系统
-bash <(curl -sSL https://linuxmirrors.cn/main.sh)
+# bash <(curl -sSL https://linuxmirrors.cn/main.sh)
 
-# 更新系统包列表
+# 更新系统
 apt update && apt upgrade -y
 
-# 安装基础开发工具
-apt install -y build-essential cmake git wget curl vim
+# 基础与网络依赖
+apt install -y build-essential cmake git wget curl vim pkg-config \
+               libnetfilter-queue-dev libnl-3-dev libnl-genl-3-dev \
+               libboost-all-dev iptables-persistent tcpdump iproute2 nftables
 
-# 安装网络和开发库
-apt install -y libnetfilter-queue-dev libnl-3-dev libnl-genl-3-dev
-apt install -y libboost-all-dev libasio-dev pkg-config
+# 可选：安装 ufw（若你用它）
+# apt install -y ufw || true
 
-# 安装系统工具
-apt install -y net-tools tcpdump iptables-persistent
-
-# 验证安装
+# 验证
 gcc --version
-pkg-config --list-all | grep netfilter
+pkg-config --list-all | grep -E 'netfilter|nfqueue'
+
 
 
 

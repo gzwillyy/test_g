@@ -1,55 +1,70 @@
 #!/bin/bash
+set -e
 
-echo "=== TCP Redirect Server Deployment on Debian 12 ==="
+echo "=== TCP Redirect Server Deployment (Debian 12) ==="
 
-# 1. 停止现有服务
-echo "Stopping existing service..."
-systemctl stop tcp_redirect 2>/dev/null
-pkill -f tcp_redirect_server
+mkdir -p /opt/tcp_redirect/{logs,backup}
 
-# 2. 清理iptables规则
-echo "Cleaning existing iptables rules..."
-iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null
-iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null
-iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null
+echo "[DEPLOY] Stop existing service (if any)..."
+systemctl stop tcp_redirect 2>/dev/null || true
+pkill -f tcp_redirect_server 2>/dev/null || true
 
-# 3. 编译程序
-echo "Building the application..."
+echo "[DEPLOY] Clean iptables NFQUEUE rules..."
+iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null || true
+iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null || true
+iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null || true
+
+echo "[DEPLOY] Build..."
 /opt/tcp_redirect/scripts/build.sh
 
-if [ $? -ne 0 ]; then
-    echo "Build failed! Deployment aborted."
-    exit 1
-fi
-
-# 4. 创建系统服务文件
-echo "Creating systemd service..."
-cat > /etc/systemd/system/tcp_redirect.service << 'SERVICEEOF'
+echo "[DEPLOY] Create systemd service..."
+cat >/etc/systemd/system/tcp_redirect.service <<'EOF'
 [Unit]
-Description=TCP Redirect Server with Window Control
+Description=TCP Redirect Server with NFQUEUE Window Control
 After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/tcp_redirect
+Environment=TCP_REDIRECT_LOG_LEVEL=DEBUG
 ExecStart=/opt/tcp_redirect/tcp_redirect_server
 Restart=always
-RestartSec=5
+RestartSec=3
 StandardOutput=journal
 StandardError=journal
 
+# 最小能力与常见硬化
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=true
+PrivateTmp=true
+PrivateDevices=true
+MemoryDenyWriteExecute=true
+
 [Install]
 WantedBy=multi-user.target
-SERVICEEOF
+EOF
 
-# 5. 重新加载systemd
 systemctl daemon-reload
 
-# 6. 配置防火墙（如果需要）
-echo "Configuring firewall..."
-ufw allow 80/tcp 2>/dev/null || iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+echo "[DEPLOY] Open port 80..."
+ufw allow 80/tcp 2>/dev/null || true
+iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
 
-echo "Deployment completed successfully!"
-echo "Start the service with: systemctl start tcp_redirect"
-echo "Enable auto-start with: systemctl enable tcp_redirect"
+echo "[DEPLOY] Done."
+echo "Use: systemctl start tcp_redirect && systemctl enable tcp_redirect"
+
+
+
+# 部署后可启用 nft 规则（任选其一方案；以下仅示例）
+# nft add table inet tcpredir || true
+# nft 'add chain inet tcpredir out { type filter hook output priority 0; }' || true
+# nft 'add rule inet tcpredir out tcp sport 80 tcp flags syn,ack queue num 1000' || true
+# nft 'add rule inet tcpredir out tcp sport 80 tcp flags ack queue num 1001' || true
+# nft 'add rule inet tcpredir out tcp sport 80 tcp flags psh,ack queue num 1002' || true
+# 删除： nft delete table inet tcpredir

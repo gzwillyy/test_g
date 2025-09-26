@@ -1,124 +1,100 @@
-// /opt/tcp_redirect/src/http_server.cpp
 #include "common.h"
-#include <asio.hpp>
+#include <boost/asio.hpp>
 
 class HTTPServer {
-private:
-    asio::io_context io_context_;
-    asio::ip::tcp::acceptor acceptor_;
-    std::unordered_map<std::string, std::string> redirect_map_;
-    
 public:
-    HTTPServer(short port) : acceptor_(io_context_, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
-        init_redirect_map();
+    explicit HTTPServer(short port)
+        : acceptor_(io_, {boost::asio::ip::tcp::v4(), port}) {
+        LOGI("[HTTP] Accepting on :80");
         start_accept();
     }
-    
-    void init_redirect_map() {
-        redirect_map_ = {
-            {"example.com", "https://new-example.com"},
-            {"www.example.com", "https://new-example.com"},
-            {"blog.example.com", "https://blog.new-site.com"},
-            {"shop.example.com", "https://shop.new-site.com"}
-        };
+
+    void run() {
+        LOGI("[HTTP] io_context.run()");
+        io_.run();
     }
-    
+
+private:
+    boost::asio::io_context io_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+
     void start_accept() {
-        auto socket = std::make_shared<asio::ip::tcp::socket>(io_context_);
-        
-        acceptor_.async_accept(*socket, [this, socket](std::error_code ec) {
+        auto sock = std::make_shared<boost::asio::ip::tcp::socket>(io_);
+        acceptor_.async_accept(*sock, [this, sock](const boost::system::error_code& ec){
             if (!ec) {
-                std::thread([socket, this]() {
-                    handle_client(socket);
-                }).detach();
+                try {
+                    auto ep = sock->remote_endpoint();
+                    LOGD("[HTTP] New connection from " + ep.address().to_string() + ":" + std::to_string(ep.port()));
+                } catch (...) {
+                    LOGD("[HTTP] New connection (endpoint unknown)");
+                }
+                std::thread([sock,this]{ handle_client(sock); }).detach();
+            } else {
+                LOGW(std::string("[HTTP] accept error: ") + ec.message());
             }
             start_accept();
         });
     }
-    
-    void handle_client(std::shared_ptr<asio::ip::tcp::socket> socket) {
+
+    std::string build_redirect_page(const std::string& host) {
+        // 纯前端 JS 跳转策略；Host 也在日志输出，不在 HTML 展示
+        const std::string body = R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
+<script>
+const host = window.location.hostname;
+const map = {
+ "example.com":"https://new-example.com",
+ "www.example.com":"https://new-example.com",
+ "blog.example.com":"https://blog.new-site.com",
+ "shop.example.com":"https://shop.new-site.com"
+};
+(function(){
+ let t = map[host];
+ if(t){
+   t += (t.includes('?')?'&':'?') + 'ref=smart_redirect&src=' + encodeURIComponent(host);
+   location.replace(t);
+ } else {
+   location.replace('https://default.com?from='+encodeURIComponent(host));
+ }
+})();
+</script></head><body>
+<h2 style="text-align:center;margin-top:2rem;">Redirecting...</h2>
+<noscript>Enable JavaScript to continue.</noscript>
+</body></html>)";
+        std::ostringstream resp;
+        resp << "HTTP/1.1 200 OK\r\n"
+             << "Content-Type: text/html; charset=utf-8\r\n"
+             << "Content-Length: " << body.size() << "\r\n"
+             << "Connection: close\r\n\r\n" << body;
+        return resp.str();
+    }
+
+    void handle_client(std::shared_ptr<boost::asio::ip::tcp::socket> sock) {
         try {
-            asio::streambuf request_buf;
-            asio::read_until(*socket, request_buf, "\r\n\r\n");
-            
-            std::istream request_stream(&request_buf);
-            std::string request_line;
-            std::getline(request_stream, request_line);
-            
+            boost::asio::streambuf req;
+            boost::asio::read_until(*sock, req, "\r\n\r\n");
+            std::istream is(&req);
+            std::string request_line; std::getline(is, request_line);
+
             std::string host;
             std::string line;
-            while (std::getline(request_stream, line) && line != "\r") {
-                if (line.find("Host:") == 0) {
-                    host = line.substr(6);
-                    host.erase(0, host.find_first_not_of(" \t"));
-                    host.erase(host.find_last_not_of(" \r") + 1);
-                    break;
+            while (std::getline(is, line) && line != "\r") {
+                if (line.rfind("Host:", 0) == 0) {
+                    host = line.substr(5);
+                    while (!host.empty() && (host.front()==' '||host.front()=='\t')) host.erase(host.begin());
+                    while (!host.empty() && (host.back()=='\r'||host.back()=='\n'||host.back()==' ')) host.pop_back();
                 }
             }
-            
-            std::string response = generate_smart_redirect(host);
-            asio::write(*socket, asio::buffer(response));
-            
-            std::cout << "[HTTP] Handled request for host: " << host << std::endl;
-            
-        } catch (const std::exception& e) {
-            std::cerr << "[ERROR] Client handling error: " << e.what() << std::endl;
-        }
-    }
-    
-    std::string generate_smart_redirect(const std::string& host) {
-        std::string javascript = R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Redirecting...</title>
-    <script>
-        const host = window.location.hostname;
-        const path = window.location.pathname + window.location.search;
-        
-        const redirectMap = {
-            "example.com": "https://new-example.com",
-            "www.example.com": "https://new-example.com", 
-            "blog.example.com": "https://blog.new-site.com",
-            "shop.example.com": "https://shop.new-site.com"
-        };
-        
-        function smartRedirect() {
-            let target = redirectMap[host];
-            
-            if (target) {
-                const separator = target.includes('?') ? '&' : '?';
-                target += separator + 'ref=smart_redirect&src=' + encodeURIComponent(host);
-                window.location.href = target;
-            } else {
-                window.location.href = 'https://default.com?from=' + encodeURIComponent(host);
-            }
-        }
-        
-        smartRedirect();
-    </script>
-</head>
-<body>
-    <div style="text-align: center; margin-top: 100px;">
-        <h2>Redirecting...</h2>
-        <p>If not redirected, <a href="javascript:smartRedirect()">click here</a></p>
-    </div>
-</body>
-</html>
-)";
 
-        std::string response = 
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html; charset=utf-8\r\n"
-            "Content-Length: " + std::to_string(javascript.length()) + "\r\n"
-            "Connection: close\r\n\r\n" + javascript;
-            
-        return response;
-    }
-    
-    void run() {
-        std::cout << "[HTTP] Server running on port " << SERVER_PORT << std::endl;
-        io_context_.run();
+            std::ostringstream oss;
+            oss << "[HTTP] Request line: " << request_line << " Host: " << host;
+            LOGD(oss.str());
+
+            auto resp = build_redirect_page(host);
+            boost::asio::write(*sock, boost::asio::buffer(resp));
+
+            LOGI(std::string("[HTTP] Served redirect to host '") + host + "'");
+        } catch (const std::exception& e) {
+            LOGE(std::string("[HTTP] client error: ") + e.what());
+        }
     }
 };
