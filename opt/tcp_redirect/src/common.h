@@ -46,7 +46,7 @@ enum class LogLevel { TRACE=0, DEBUG=1, INFO=2, WARN=3, ERROR=4, FATAL=5 };
 inline LogLevel current_log_level() {
     const char* env = std::getenv("TCP_REDIRECT_LOG_LEVEL");
     if (!env) return LogLevel::DEBUG; // 默认 DEBUG
-    std::string s(env);
+    std::string s(env ? env : "");
     if (s=="TRACE") return LogLevel::TRACE;
     if (s=="DEBUG") return LogLevel::DEBUG;
     if (s=="INFO")  return LogLevel::INFO;

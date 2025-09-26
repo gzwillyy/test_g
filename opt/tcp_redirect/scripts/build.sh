@@ -12,10 +12,11 @@ fi
 CXXFLAGS="$(pkg-config --cflags libnetfilter_queue)"
 LIBS="$(pkg-config --libs libnetfilter_queue)"
 
-# Boost.Asio 方案（保留 -lboost_system）
+# 注意：main.cpp 里已经 #include "tcp_window_controller.cpp"
+# 这里不再把 tcp_window_controller.cpp 作为独立翻译单元编译，避免重复定义/链接冲突
 g++ -std=c++17 -O3 -Wall -Wextra -Wpedantic -pthread \
     $CXXFLAGS \
-    tcp_window_controller.cpp http_server.cpp main.cpp \
+    http_server.cpp main.cpp \
     $LIBS -lboost_system \
     -o /opt/tcp_redirect/tcp_redirect_server
 

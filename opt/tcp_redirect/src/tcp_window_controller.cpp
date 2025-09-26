@@ -7,8 +7,9 @@ public:
 
     void start() {
         LOGI("Starting TCPWindowController...");
+        // ❌ 不要对含 atomic 的结构体做赋值：queues_stats_[i] = {};
+        // 让其保持默认构造的零值即可。
         for (int i = 0; i < NFQUEUE_COUNT; ++i) {
-            queues_stats_[i] = {};
             workers_[i] = std::thread(&TCPWindowController::worker_thread, this, NFQUEUE_NUM[i], i);
         }
         setup_iptables_rules();

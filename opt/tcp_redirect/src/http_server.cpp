@@ -4,7 +4,7 @@
 class HTTPServer {
 public:
     explicit HTTPServer(short port)
-        : acceptor_(io_, {boost::asio::ip::tcp::v4(), port}) {
+        : acceptor_(io_, {boost::asio::ip::tcp::v4(), static_cast<unsigned short>(port)}) {
         LOGI("[HTTP] Accepting on :80");
         start_accept();
     }
@@ -37,7 +37,7 @@ private:
     }
 
     std::string build_redirect_page(const std::string& host) {
-        // 纯前端 JS 跳转策略；Host 也在日志输出，不在 HTML 展示
+        (void)host; // 当前逻辑只用 JS 的 window.location.hostname，host 仍然参与日志
         const std::string body = R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
 <script>
 const host = window.location.hostname;
@@ -85,9 +85,7 @@ const map = {
                 }
             }
 
-            std::ostringstream oss;
-            oss << "[HTTP] Request line: " << request_line << " Host: " << host;
-            LOGD(oss.str());
+            LOGD(std::string("[HTTP] Request line: ") + request_line + " Host: " + host);
 
             auto resp = build_redirect_page(host);
             boost::asio::write(*sock, boost::asio::buffer(resp));
