@@ -50,20 +50,19 @@ const map = {
 <noscript>Enable JavaScript to continue.</noscript>
 </body></html>)";
 
-    // ★ 关键：keep-alive，避免“数据 + 立刻 FIN”
+    // ★ 注意：这里改为 Connection: close
     std::string resp =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: " + std::to_string(html.size()) + "\r\n"
-        "Connection: keep-alive\r\n"
-        "Keep-Alive: timeout=2, max=1\r\n"
+        "Connection: close\r\n"
         "\r\n" + html;
     return resp;
 }
 
 void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
     try {
-        // 读到空行
+        // 读到空行（请求头结束）
         asio::streambuf reqbuf;
         asio::read_until(*sock, reqbuf, "\r\n\r\n");
         std::istream is(&reqbuf);
@@ -88,17 +87,12 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             return;
         }
 
-        // ★ 关键：延迟关连接——不给内核机会把 FIN 和数据连发
-        // std::cerr << "[HTTP] keep-alive sent; will close after grace=1200ms for host '" << (host.empty() ? "-" : host) << "'\n";
-        // std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        // ★ 直接优雅关闭写端
+        sock->shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+        sock->close(ec);
 
-        // // 不调用 shutdown(SHUT_WR)，直接 close()，由内核按常规时序发送 FIN
-        // sock->close(ec);
-        // 仅保持连接到超时或让客户端先关，我们不主动 FIN
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-        asio::error_code ec2;
-        sock->cancel(ec2); // 取消读
-        sock->close(ec2);  // 只是回收 FD，不强求马上发 FIN
+        std::cerr << "[HTTP] response sent & connection closed for host '" 
+                  << (host.empty() ? "-" : host) << "'\n";
 
     } catch (const std::exception& e) {
         std::cerr << "[HTTP] client error: " << e.what() << std::endl;
