@@ -11,7 +11,7 @@ public:
         stop();
     }
 
-    // 完整的TCP校验和计算
+    // TCP校验和计算
     unsigned short compute_tcp_checksum(struct iphdr* iph, struct tcphdr* tcph, unsigned char* payload, int payload_len) {
         unsigned long sum = 0;
         unsigned char* tcp_ptr = (unsigned char*)tcph;
@@ -108,12 +108,6 @@ public:
         
         struct iphdr *iph = (struct iphdr*)packet_data;
         
-        if (len < ntohs(iph->tot_len)) {
-            std::cerr << "[ERROR] Packet truncated: expected " << ntohs(iph->tot_len) 
-                      << " bytes, got " << len << " bytes" << std::endl;
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-        }
-        
         if (iph->protocol == IPPROTO_TCP) {
             int ip_header_len = iph->ihl * 4;
             
@@ -169,8 +163,6 @@ public:
             return;
         }
         
-        nfq_set_queue_maxlen(qh, 1024);
-        
         int fd = nfq_fd(h);
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
@@ -194,31 +186,21 @@ public:
                 int recv_len = recv(fd, buffer, sizeof(buffer), 0);
                 if (recv_len > 0) {
                     nfq_handle_packet(h, buffer, recv_len);
-                } else if (recv_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                    std::cerr << "[ERROR] Error receiving packet in queue " << queue_num << ": " 
-                              << strerror(errno) << std::endl;
-                    break;
                 }
-            } else if (rv < 0) {
-                if (errno != EINTR) {
-                    std::cerr << "[ERROR] Select error in queue " << queue_num << ": " 
-                              << strerror(errno) << std::endl;
-                    break;
-                }
+            } else if (rv < 0 && errno != EINTR) {
+                break;
             }
         }
         
-        std::cout << "[INFO] NFQUEUE worker " << queue_num << " shutting down" << std::endl;
         nfq_destroy_queue(qh);
         nfq_close(h);
     }
 
     void start() {
-        std::cout << "[INFO] Starting TCP Window Controller with 3 NFQUEUE workers..." << std::endl;
+        std::cout << "[INFO] Starting TCP Window Controller..." << std::endl;
         
         for (int i = 0; i < 3; ++i) {
             workers_[i] = std::thread(&TCPWindowController::worker_thread, this, NFQUEUE_NUM[i]);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         
         setup_iptables_rules();
@@ -232,7 +214,6 @@ public:
         for (int i = 0; i < 3; ++i) {
             if (workers_[i].joinable()) {
                 workers_[i].join();
-                std::cout << "[INFO] Worker " << i << " stopped" << std::endl;
             }
         }
         
@@ -244,15 +225,9 @@ private:
     void setup_iptables_rules() {
         std::cout << "[INFO] Setting up iptables rules..." << std::endl;
         
-        // 清理可能冲突的规则
-        system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
-        system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
-        system("iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
-        
-        // 设置精确规则
-        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000");
-        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001");
-        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002");
+        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num 1000 2>/dev/null");
+        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags ACK ACK -j NFQUEUE --queue-num 1001 2>/dev/null");
+        system("iptables -I OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --queue-num 1002 2>/dev/null");
         
         std::cout << "[INFO] Iptables rules set up successfully" << std::endl;
     }

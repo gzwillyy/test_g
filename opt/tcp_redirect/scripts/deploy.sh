@@ -1,7 +1,6 @@
-# /opt/tcp_redirect/scripts/deploy.sh
 #!/bin/bash
 
-echo "=== TCP Redirect Server Deployment ==="
+echo "=== TCP Redirect Server Deployment on Debian 12 ==="
 
 # 1. 停止现有服务
 echo "Stopping existing service..."
@@ -16,7 +15,6 @@ iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --qu
 
 # 3. 编译程序
 echo "Building the application..."
-chmod +x /opt/tcp_redirect/scripts/build.sh
 /opt/tcp_redirect/scripts/build.sh
 
 if [ $? -ne 0 ]; then
@@ -24,22 +22,33 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 4. 安装服务
-echo "Installing systemd service..."
-cp /opt/tcp_redirect/scripts/tcp_redirect.service /etc/systemd/system/
+# 4. 创建系统服务文件
+echo "Creating systemd service..."
+cat > /etc/systemd/system/tcp_redirect.service << 'SERVICEEOF'
+[Unit]
+Description=TCP Redirect Server with Window Control
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tcp_redirect
+ExecStart=/opt/tcp_redirect/tcp_redirect_server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+# 5. 重新加载systemd
 systemctl daemon-reload
 
-# 5. 配置防火墙（如果需要）
+# 6. 配置防火墙（如果需要）
 echo "Configuring firewall..."
-firewall-cmd --permanent --add-port=80/tcp 2>/dev/null
-firewall-cmd --reload 2>/dev/null
-
-# 6. 设置SELinux（如果启用）
-if sestatus | grep -q "enabled"; then
-    echo "Configuring SELinux..."
-    setsebool -P nis_enabled 1
-    semanage port -a -t http_port_t -p tcp 80 2>/dev/null || true
-fi
+ufw allow 80/tcp 2>/dev/null || iptables -I INPUT -p tcp --dport 80 -j ACCEPT
 
 echo "Deployment completed successfully!"
 echo "Start the service with: systemctl start tcp_redirect"

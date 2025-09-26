@@ -1,8 +1,15 @@
-# 查看服务日志
-journalctl -u tcp_redirect -f
+#!/bin/bash
 
-# 实时监控网络包
-tcpdump -i any port 80 -n
+echo "=== Real-time Monitoring ==="
+echo "Service Status: $(systemctl is-active tcp_redirect)"
+echo "Process Count: $(pgrep -f tcp_redirect_server | wc -l)"
+echo "TCP Connections on port 80:"
+netstat -tlnp | grep :80 || echo "None"
 
-# 检查NFQUEUE统计
-iptables -L OUTPUT -v -n
+echo ""
+echo "Recent Logs:"
+journalctl -u tcp_redirect -n 10 --no-pager
+
+echo ""
+echo "NFQUEUE Rules:"
+iptables -L OUTPUT -n -v | grep NFQUEUE || echo "No NFQUEUE rules found"

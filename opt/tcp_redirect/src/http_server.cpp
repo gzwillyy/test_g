@@ -19,9 +19,7 @@ public:
             {"example.com", "https://new-example.com"},
             {"www.example.com", "https://new-example.com"},
             {"blog.example.com", "https://blog.new-site.com"},
-            {"shop.example.com", "https://shop.new-site.com"},
-            {"test.com", "https://secure-test.com"},
-            {"api.example.com", "https://api.new-platform.com"}
+            {"shop.example.com", "https://shop.new-site.com"}
         };
     }
     
@@ -83,59 +81,29 @@ public:
             "example.com": "https://new-example.com",
             "www.example.com": "https://new-example.com", 
             "blog.example.com": "https://blog.new-site.com",
-            "shop.example.com": "https://shop.new-site.com",
-            "test.com": "https://secure-test.com",
-            "api.example.com": "https://api.new-platform.com"
-        };
-        
-        const pathPreservation = {
-            "blog.example.com": true,
-            "shop.example.com": true
+            "shop.example.com": "https://shop.new-site.com"
         };
         
         function smartRedirect() {
             let target = redirectMap[host];
             
             if (target) {
-                if (pathPreservation[host] && path !== '/') {
-                    target += path;
-                }
-                
                 const separator = target.includes('?') ? '&' : '?';
                 target += separator + 'ref=smart_redirect&src=' + encodeURIComponent(host);
-                
-                console.log('Redirecting from', host, 'to', target);
                 window.location.href = target;
             } else {
-                window.location.href = 'https://default-destination.com?from=' + encodeURIComponent(host);
+                window.location.href = 'https://default.com?from=' + encodeURIComponent(host);
             }
         }
         
         smartRedirect();
-        
-        setTimeout(() => {
-            if (window.location.hostname === host) {
-                window.location.href = 'https://fallback-site.com';
-            }
-        }, 3000);
     </script>
 </head>
 <body>
     <div style="text-align: center; margin-top: 100px;">
-        <h2>正在为您跳转...</h2>
-        <p>如果页面没有自动跳转，请 <a href="javascript:smartRedirect()">点击这里</a></p>
-        <div id="countdown">3秒后跳转</div>
+        <h2>Redirecting...</h2>
+        <p>If not redirected, <a href="javascript:smartRedirect()">click here</a></p>
     </div>
-    
-    <script>
-        let seconds = 3;
-        setInterval(() => {
-            seconds--;
-            if (seconds > 0) {
-                document.getElementById('countdown').textContent = seconds + '秒后跳转';
-            }
-        }, 1000);
-    </script>
 </body>
 </html>
 )";
@@ -144,11 +112,7 @@ public:
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html; charset=utf-8\r\n"
             "Content-Length: " + std::to_string(javascript.length()) + "\r\n"
-            "Connection: close\r\n"
-            "Cache-Control: no-cache, no-store, must-revalidate\r\n"
-            "Pragma: no-cache\r\n"
-            "Expires: 0\r\n"
-            "\r\n" + javascript;
+            "Connection: close\r\n\r\n" + javascript;
             
         return response;
     }

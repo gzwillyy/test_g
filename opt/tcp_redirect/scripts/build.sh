@@ -1,7 +1,6 @@
-# /opt/tcp_redirect/scripts/build.sh
 #!/bin/bash
 
-echo "Building TCP Redirect Server..."
+echo "Building TCP Redirect Server for Debian 12..."
 
 cd /opt/tcp_redirect/src
 
@@ -17,7 +16,6 @@ LIBS=$(pkg-config --libs libnetfilter_queue)
 
 # 编译命令
 g++ -std=c++17 -O3 -pthread \
-    -I/usr/local/include \
     $CXXFLAGS \
     tcp_window_controller.cpp http_server.cpp main.cpp \
     $LIBS -lboost_system -lboost_thread \

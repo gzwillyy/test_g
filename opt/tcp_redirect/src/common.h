@@ -21,6 +21,8 @@
 #include <signal.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 // NFQUEUE
 #include <libnetfilter_queue/libnetfilter_queue.h>
