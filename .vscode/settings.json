@@ -47,6 +47,23 @@
         "execution": "cpp",
         "optional": "cpp",
         "variant": "cpp",
-        "algorithm": "cpp"
+        "algorithm": "cpp",
+        "__availability": "cpp",
+        "atomic": "cpp",
+        "bit": "cpp",
+        "chrono": "cpp",
+        "compare": "cpp",
+        "concepts": "cpp",
+        "exception": "cpp",
+        "functional": "cpp",
+        "iomanip": "cpp",
+        "iterator": "cpp",
+        "memory": "cpp",
+        "system_error": "cpp",
+        "thread": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp",
+        "__memory": "cpp",
+        "memory_resource": "cpp"
     }
 }

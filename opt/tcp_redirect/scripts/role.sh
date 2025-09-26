@@ -14,7 +14,7 @@ systemctl start tcp_redirect
 systemctl enable tcp_redirect
 
 # 检查服务状态
-systemctl status tcp_redirect
+systemctl status tcp_redirect --no-pager
 
 # 测试服务
 /opt/tcp_redirect/scripts/test.sh

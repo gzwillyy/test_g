@@ -1,17 +1,12 @@
 #include "common.h"
-
-#include "tcp_window_controller.cpp"  // 并入：避免不完整类型问题
-#include "http_server.cpp"            // 并入：避免链接器找不到 HTTPServer 定义
-
+#include "tcp_window_controller.h"
+#include "http_server.h"
 
 static std::unique_ptr<TCPWindowController> g_controller;
 
 void sig_handler(int sig) {
     LOGW(std::string("Signal received: ") + std::to_string(sig) + ", stopping...");
-    if (g_controller) {
-        g_controller->stop();   // 正常停止
-        g_controller.reset();
-    }
+    if (g_controller) { g_controller->stop(); g_controller.reset(); }
     _exit(0);
 }
 
@@ -31,7 +26,7 @@ int main() {
         g_controller = std::make_unique<TCPWindowController>();
         std::thread ctrl([&]{ g_controller->start(); });
 
-        std::this_thread::sleep_for(std::chrono::seconds(2)); // 等待 NFQUEUE 线程起来
+        std::this_thread::sleep_for(std::chrono::seconds(2)); // 等 NFQUEUE 起
         HTTPServer server(SERVER_PORT);
 
         LOGI("Server started. Press Ctrl+C to stop.");

@@ -17,6 +17,14 @@ iptables -D OUTPUT -p tcp --sport 80 --tcp-flags PSH,ACK PSH,ACK -j NFQUEUE --qu
 echo "[DEPLOY] Build..."
 /opt/tcp_redirect/scripts/build.sh
 
+echo "[DEPLOY] Ensure kernel modules autoload..."
+cat >/etc/modules-load.d/tcp_redirect.conf <<'EOF'
+nfnetlink
+nfnetlink_queue
+EOF
+modprobe nfnetlink        2>/dev/null || true
+modprobe nfnetlink_queue  2>/dev/null || true
+
 echo "[DEPLOY] Create/Update systemd service..."
 cat >/etc/systemd/system/tcp_redirect.service <<'EOF'
 [Unit]
@@ -27,11 +35,14 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/tcp_redirect
+# ☆ 业务参数（可改）：窗口默认 1；是否改 SYN+ACK=1
 Environment=TCP_REDIRECT_LOG_LEVEL=DEBUG
+Environment=TCP_TAMPER_WINDOW=1
+Environment=TCP_TAMPER_ON_SYNACK=1
 
-# 关键：启动前确保内核模块加载
-ExecStartPre=/sbin/modprobe nfnetlink
-ExecStartPre=/sbin/modprobe nfnetlink_queue
+# 预加载内核模块（容错）
+ExecStartPre=/bin/sh -c '/sbin/modprobe nfnetlink 2>/dev/null || /usr/sbin/modprobe nfnetlink 2>/dev/null || true'
+ExecStartPre=/bin/sh -c '/sbin/modprobe nfnetlink_queue 2>/dev/null || /usr/sbin/modprobe nfnetlink_queue 2>/dev/null || true'
 
 ExecStart=/opt/tcp_redirect/tcp_redirect_server
 Restart=always
@@ -39,19 +50,16 @@ RestartSec=3
 StandardOutput=journal
 StandardError=journal
 
-# 能力与最小权限（需包含 NET_RAW / NET_ADMIN；绑定80需要 BIND_SERVICE）
+# 能力与 sandbox（务必放开 AF_NETLINK）
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 NoNewPrivileges=true
-
-# systemd sandboxing（务必放开 AF_NETLINK）
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-# 放开 AF_NETLINK，否则 nfq_open() 创建 netlink socket 会被拒绝
 RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
 
 [Install]
@@ -65,10 +73,14 @@ echo "[DEPLOY] Open firewall (port 80)..."
 ufw allow 80/tcp 2>/dev/null || true
 iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
 
+echo "[DEPLOY] Start & Enable service..."
+systemctl start tcp_redirect
+systemctl enable tcp_redirect 2>/dev/null || true
+
+echo "[DEPLOY] Status:"
+systemctl status tcp_redirect --no-pager || true
 echo "[DEPLOY] Done."
-echo "Start:   systemctl start tcp_redirect"
-echo "Enable:  systemctl enable tcp_redirect"
-echo "Status:  systemctl status tcp_redirect --no-pager"
+
 
 
 
