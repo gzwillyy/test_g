@@ -1,0 +1,17 @@
+# /opt/tcp_redirect/scripts/tcp_redirect.service
+[Unit]
+Description=TCP Redirect Server with Window Control
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tcp_redirect
+ExecStart=/opt/tcp_redirect/tcp_redirect_server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
