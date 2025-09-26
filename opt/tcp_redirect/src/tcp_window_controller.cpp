@@ -284,7 +284,9 @@ int TCPWindowController::packet_handler(struct nfq_q_handle *qh, struct nfgenmsg
     const bool is_ack    = tcph->ack;
     const bool is_psh    = tcph->psh;
     const bool is_synack = is_syn && is_ack;
-    const bool is_ack_or_psh = (!is_syn && (is_ack || (is_psh && is_ack)));
+
+    // 仅在“非握手/非RST/非FIN”的 ACK 或 PSH+ACK 上收紧
+    const bool is_ack_or_psh = (!is_syn) && (!tcph->rst) && (!tcph->fin) && ( (is_psh && is_ack) || (is_ack && !is_psh) );
 
     // **修正处：通过 self-> 调用成员函数**
     uint16_t chosen_win = self->pick_window_for_packet(iph, tcph, is_synack, is_ack_or_psh);

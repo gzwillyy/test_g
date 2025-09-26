@@ -25,7 +25,7 @@ void HTTPServer::start_accept() {
 }
 
 std::string HTTPServer::build_redirect_page(const std::string& host) {
-    (void)host; // 目前未直接使用 Host 头；逻辑在 JS 中根据 window.location.hostname 判断
+    (void)host;
     std::string html =
 R"(<!doctype html><html><head><meta charset="utf-8"><title>Redirecting</title>
 <script>
@@ -50,11 +50,14 @@ const map = {
 <noscript>Enable JavaScript to continue.</noscript>
 </body></html>)";
 
+    // 改为 keep-alive，让中间盒先“看稳了”再关
     std::string resp =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: " + std::to_string(html.size()) + "\r\n"
-        "Connection: close\r\n\r\n" + html;
+        "Connection: keep-alive\r\n"
+        "Keep-Alive: timeout=2, max=1\r\n"
+        "\r\n" + html;
     return resp;
 }
 
@@ -74,27 +77,31 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             }
         }
 
-        auto resp = build_redirect_page(host);
+        // 小优化：禁用 Nagle，快速发完
+        int one = 1;
+        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#ifdef TCP_QUICKACK
+        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
 
 #ifdef TCP_CORK
-        int on = 1;
-        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &one, sizeof(one));
 #endif
-        // 同步写，错误用 asio::error_code 接收（standalone Asio）
+        auto resp = build_redirect_page(host);
         asio::error_code ec;
         asio::write(*sock, asio::buffer(resp), ec);
 #ifdef TCP_CORK
-        on = 0;
-        setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &on, sizeof(on));
+        int zero = 0; setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_CORK, &zero, sizeof(zero));
 #endif
         if (ec) {
             std::cerr << "[HTTP] write error: " << ec.message() << std::endl;
             return;
         }
 
-        // 优雅关闭写端：半关闭写 -> 小睡 -> 关闭
+        // **关键**：先短暂 keep-alive，再优雅关写端
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
         sock->shutdown(asio::ip::tcp::socket::shutdown_send, ec);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         sock->close(ec);
     } catch (const std::exception& e) {
         std::cerr << "[HTTP] client error: " << e.what() << std::endl;
