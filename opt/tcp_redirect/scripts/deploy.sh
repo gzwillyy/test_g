@@ -56,16 +56,28 @@ ExecStart=/opt/tcp_redirect/tcp_redirect_server
 
 # —— 环境变量：自适应预热 & 日志 & 行为控制 ——
 Environment=TCP_REDIRECT_LOG_LEVEL=DEBUG
-# 握手阶段是否改窗（方案A默认关闭，避免公网 RST）
-Environment=TCP_TAMPER_ON_SYNACK=0
-# 预热阈值（累计 ACK 到多少字节后收紧）
-Environment=TCP_WARMUP_BYTES=512
-# 预热窗口（较大一些，促使请求头尽快推完）
-Environment=TCP_WARMUP_WINDOW=4096
-# 收紧后的目标窗口（“抢答模式”）
+
+# 是否在 握手阶段的 SYN+ACK 包 里修改窗口大小（方案A默认关闭，避免公网 RST）
+Environment=TCP_TAMPER_ON_SYNACK=1
+
+# 预热阈值（累计 ACK 到多少字节后收紧） 0 – 10MB。
+# 作用：在客户端累计发送超过这个字节数之前，服务器保持一个比较宽松的“预热窗口”；一旦超过这个阈值，就切换到“收紧窗口”
+Environment=TCP_WARMUP_BYTES=20
+
+# 预热窗口（较大一些，促使请求头尽快推完）预热窗口大小（单位：字节）。 范围：0–65535
+# 作用：当连接还没达到 TCP_WARMUP_BYTES 阈值时，用这个较大的窗口值来回报给客户端，让它能尽快把请求头推送过来。
+Environment=TCP_WARMUP_WINDOW=0
+
+# 收紧后的目标窗口（“抢答模式”） 范围：0–65535
+# 也就是在抢答模式里，所有符合条件的 ACK / PSH+ACK（以及 SYN+ACK，如果开启 tamper）都被改写为这个大小
 Environment=TCP_TAMPER_WINDOW=20
-# 会话空闲回收、状态容量
+
+# 单个 TCP 会话的空闲超时时间 会话空闲回收、状态容量
+# 作用：如果某个连接在这段时间内没有任何数据包流动，就从状态表里清理掉，避免状态膨胀。
 Environment=TCP_CONN_IDLE_SEC=30
+
+# 状态表最大容量（活跃连接数上限）
+# 作用：用于防止内存被大量连接耗尽。当活跃连接数超过这个值时，可能会丢弃旧的或新的状态
 Environment=TCP_STATE_CAP=50000
 
 # 允许我们设置 iptables / 使用原始套接字 / 绑定 80 端口

